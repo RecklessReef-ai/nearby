@@ -1,0 +1,19 @@
+# Nearby, prototype A: runs on the laptop. Both services use the host network
+# so they can see the house (the app) and answer the house (AdGuard on port 53).
+services:
+  adguard:
+    image: adguard/adguardhome:v0.107.79
+    container_name: nearby-adguard
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./adguard/work:/opt/adguardhome/work
+      - ./adguard/conf:/opt/adguardhome/conf
+  app:
+    build: ./app
+    container_name: nearby-app
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data

@@ -1,0 +1,7 @@
+data/
+adguard/work/
+adguard/conf/AdGuardHome.yaml
+.env
+__pycache__/
+*.pyc
+.venv/

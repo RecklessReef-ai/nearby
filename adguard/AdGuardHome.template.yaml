@@ -1,0 +1,80 @@
+# Nearby's AdGuard Home setup. install.sh copies this to adguard/conf/AdGuardHome.yaml
+# with LAN_IP filled in. Logging only on day one: no list is on until you tap it.
+bind_host: 0.0.0.0
+bind_port: 3000
+users: []
+auth_attempts: 5
+block_auth_min: 15
+http_proxy: ""
+language: en
+theme: auto
+debug_pprof: false
+web_session_ttl: 720
+dns:
+  bind_hosts:
+    - __LAN_IP__
+  port: 53
+  statistics_interval: 90
+  querylog_enabled: true
+  querylog_file_enabled: true
+  querylog_interval: 2160h
+  querylog_size_memory: 1000
+  anonymize_client_ip: false
+  protection_enabled: true
+  blocking_mode: default
+  blocked_response_ttl: 10
+  ratelimit: 0
+  refuse_any: true
+  upstream_dns:
+    - https://dns.quad9.net/dns-query
+    - https://cloudflare-dns.com/dns-query
+  bootstrap_dns:
+    - 9.9.9.10
+    - 149.112.112.10
+    - 1.1.1.1
+  all_servers: false
+  fastest_addr: false
+  filtering_enabled: true
+  filters_update_interval: 24
+  parental_enabled: false
+  safesearch_enabled: false
+  safebrowsing_enabled: false
+  cache_size: 4194304
+  cache_ttl_min: 0
+  cache_ttl_max: 0
+  aaaa_disabled: false
+  enable_dnssec: false
+  local_ptr_upstreams: []
+filters:
+  - enabled: false
+    url: https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/native.samsung.txt
+    name: Quiet the Samsung TV (hagezi native list)
+    id: 1
+  - enabled: false
+    url: https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/native.lgwebos.txt
+    name: Quiet an LG TV (hagezi native list)
+    id: 2
+  - enabled: false
+    url: https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/native.roku.txt
+    name: Quiet a Roku (hagezi native list)
+    id: 3
+  - enabled: false
+    url: https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/native.amazon.txt
+    name: Quiet Amazon devices (hagezi native list)
+    id: 4
+  - enabled: false
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+    name: AdGuard DNS filter (ads and trackers)
+    id: 5
+whitelist_filters: []
+user_rules: []
+dhcp:
+  enabled: false
+log_compress: false
+log_localtime: false
+log_max_backups: 0
+log_max_size: 100
+log_max_age: 3
+log_file: ""
+verbose: false
+schema_version: 14

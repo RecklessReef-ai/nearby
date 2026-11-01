@@ -29,4 +29,11 @@ echo "  The page:          http://$LAN_IP:8765"
 echo "  AdGuard Home:      http://$LAN_IP:3000   (no login on the trusted Wi-Fi)"
 echo "  Your house's phone book now lives at $LAN_IP. Point a device's DNS there to see what it asks for."
 echo "  Samsung TV: Settings > General > Network > Network Status > IP Settings > DNS Setting > Enter manually > $LAN_IP"
+if command -v ufw >/dev/null && systemctl is-active --quiet ufw 2>/dev/null; then
+  NET="$(ip -4 route show dev "$(ip -4 route show default | awk '{print $5}' | head -1)" | awk '/proto kernel/ {print $1}' | head -1)"
+  say "This computer's firewall (ufw) is on. Other devices can't reach Nearby until you open three doors to your home network only:"
+  echo "  sudo ufw allow from ${NET:-192.168.0.0/24} to any port 8765 proto tcp comment 'Nearby page'"
+  echo "  sudo ufw allow from ${NET:-192.168.0.0/24} to any port 3000 proto tcp comment 'Nearby AdGuard page'"
+  echo "  sudo ufw allow from ${NET:-192.168.0.0/24} to any port 53 comment 'Nearby phone book'"
+fi
 say "To stop: docker compose down.   To undo a TV: set its DNS back to automatic."

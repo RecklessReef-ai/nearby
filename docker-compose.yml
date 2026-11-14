@@ -1,4 +1,4 @@
-# Nearby, prototype A: runs on the laptop. Both services use the host network
+# Nearby runs on one small box beside the router. Both services use the host network
 # so they can see the house (the app) and answer the house (AdGuard on port 53).
 services:
   adguard:
@@ -6,6 +6,8 @@ services:
     container_name: nearby-adguard
     network_mode: host
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./adguard/work:/opt/adguardhome/work
       - ./adguard/conf:/opt/adguardhome/conf
@@ -15,5 +17,18 @@ services:
     network_mode: host
     restart: unless-stopped
     env_file: .env
+    # the app keeps only what it needs: no way to gain rights, nothing writable but its data folder
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW  # to ping the house when it looks for devices
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
     volumes:
       - ./data:/data
+      - /etc/localtime:/etc/localtime:ro  # the house's clock: the 8 pm letter and the night detector use it

@@ -1,6 +1,6 @@
 # Nearby's AdGuard Home setup. install.sh copies this to adguard/conf/AdGuardHome.yaml
 # with LAN_IP filled in. Logging only on day one: no list is on until you tap it.
-bind_host: 0.0.0.0
+bind_host: 127.0.0.1  # the controls answer on the box only; Nearby is the way in
 bind_port: 3000
 users: []
 auth_attempts: 5

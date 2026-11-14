@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One command. Brings up Nearby on this computer: the finder and page on :8765, AdGuard Home on :3000 and :53.
+# One command. Brings up Nearby on this computer: the finder and page on :8765, and AdGuard Home as the phone book on :53 (its own controls answer on this computer only).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -18,22 +18,35 @@ if [ -z "$LAN_IP" ]; then
 fi
 
 mkdir -p adguard/conf adguard/work data
+chmod 600 .env    # the door's password lives here
 if [ ! -f adguard/conf/AdGuardHome.yaml ]; then
   sed "s/__LAN_IP__/$LAN_IP/" adguard/AdGuardHome.template.yaml > adguard/conf/AdGuardHome.yaml
 fi
 
-docker compose up -d --build
+# Build first, while this computer can still look names up. It may be using Nearby's own phone book.
+docker compose build app
+
+# The app runs with almost no rights, so its data folder has to belong to it. Hand the folder over and shut it to everyone else.
+docker compose run --rm --no-deps --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --entrypoint sh app -c 'chown -R 0:0 /data && chmod 700 /data'
+
+# An older install left the phone book's controls open to the whole house with no password. Shut them to this computer only.
+if docker compose run --rm --no-deps --cap-add DAC_OVERRIDE -v "$PWD/adguard/conf:/conf" --entrypoint sh app -c 'grep -Eq "^(bind_host: 0\.0\.0\.0|  address: 0\.0\.0\.0:3000)" /conf/AdGuardHome.yaml'; then
+  say "Closing the phone book's controls to this computer only. Names stop resolving for a few seconds."
+  docker compose stop adguard
+  docker compose run --rm --no-deps --cap-add DAC_OVERRIDE -v "$PWD/adguard/conf:/conf" --entrypoint sh app -c 'sed -i -E "s/^bind_host: 0\.0\.0\.0/bind_host: 127.0.0.1/; s/^(  address: )0\.0\.0\.0:3000/\1127.0.0.1:3000/" /conf/AdGuardHome.yaml'
+fi
+
+docker compose up -d
 
 say "Nearby is up."
 echo "  The page:          http://$LAN_IP:8765"
-echo "  AdGuard Home:      http://$LAN_IP:3000   (no login on the trusted Wi-Fi)"
+echo "  Open the page now and choose a password. The first person to open a fresh box claims it."
 echo "  Your house's phone book now lives at $LAN_IP. Point a device's DNS there to see what it asks for."
 echo "  Samsung TV: Settings > General > Network > Network Status > IP Settings > DNS Setting > Enter manually > $LAN_IP"
 if command -v ufw >/dev/null && systemctl is-active --quiet ufw 2>/dev/null; then
   NET="$(ip -4 route show dev "$(ip -4 route show default | awk '{print $5}' | head -1)" | awk '/proto kernel/ {print $1}' | head -1)"
-  say "This computer's firewall (ufw) is on. Other devices can't reach Nearby until you open three doors to your home network only:"
+  say "This computer's firewall (ufw) is on. Other devices can't reach Nearby until you open two doors to your home network only:"
   echo "  sudo ufw allow from ${NET:-192.168.0.0/24} to any port 8765 proto tcp comment 'Nearby page'"
-  echo "  sudo ufw allow from ${NET:-192.168.0.0/24} to any port 3000 proto tcp comment 'Nearby AdGuard page'"
   echo "  sudo ufw allow from ${NET:-192.168.0.0/24} to any port 53 comment 'Nearby phone book'"
 fi
 say "To stop: docker compose down.   To undo a TV: set its DNS back to automatic."

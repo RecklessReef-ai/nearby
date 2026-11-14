@@ -19,7 +19,7 @@ ADGUARD = os.environ.get("ADGUARD_URL") or "http://127.0.0.1:3000"  # the phone 
 BASELINE = find.DATA_DIR / "baseline.json"
 TOP_N = 8
 _TWO_LEVEL = {"co", "com", "net", "org", "gov", "ac", "edu"}
-_ADDRESS = re.compile(r"\b(\d{1,3}\.){3}\d{1,3}\b|\b([0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b|\b[0-9a-f]{1,4}(::?[0-9a-f]{1,4}){2,7}\b|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|\b\d{1,2}:\d{2}\b", re.I)
+_ADDRESS = re.compile(r"\b(\d{1,3}[.-]){3}\d{1,3}\b|\b[0-9a-f]{12}\b|\b([0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b|\b[0-9a-f]{1,4}(::?[0-9a-f]{1,4}){2,7}\b|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|\b\d{1,2}:\d{2}\b", re.I)
 _SITE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+")
 
 

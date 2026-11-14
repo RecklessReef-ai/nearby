@@ -6,8 +6,8 @@ written here as rows, so they build up over days and can be asked about: by the 
 The tables are laid out for a whole home, not only its network. Every device and every reading belongs to an area:
 network, power, air, water, food. Only network has rows today. `readings` and `automations` are empty and waiting.
 
-A brain never sees a hardware address or a network address. `devices.mac` is the one column that holds one, it is
-never in what `describe` or `rows` give out, and no table holds a network address at all.
+A brain never sees a hardware address or a network address. `devices.mac` and `changes.mac` are the only columns that
+hold one, they are never in what `describe` or `rows` give out, and no table holds a network address at all.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from . import detectors, find, fixes
 DB = find.DATA_DIR / "nearby.db"
 AREAS = ("network", "power", "air", "water", "food")
 _lock = threading.Lock()
+_opening = threading.Lock()
 
 SCHEMA = [
     """
@@ -50,13 +51,24 @@ SCHEMA = [
         when_text TEXT NOT NULL, do_text TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
         asked_by TEXT NOT NULL, asked_on TEXT NOT NULL, approved_on TEXT);
     """,
+    """
+    DROP TABLE findings;
+    CREATE TABLE findings (
+        day TEXT NOT NULL, device_id INTEGER NOT NULL REFERENCES devices(id), kind TEXT NOT NULL, about TEXT NOT NULL DEFAULT '',
+        text TEXT NOT NULL, PRIMARY KEY (day, device_id, kind, about));
+    DROP TABLE changes;
+    CREATE TABLE changes (
+        at TEXT NOT NULL, mac TEXT NOT NULL DEFAULT '', device_id INTEGER REFERENCES devices(id), action TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '', undo INTEGER NOT NULL DEFAULT 0, by TEXT NOT NULL DEFAULT 'owner',
+        PRIMARY KEY (at, mac, action, name, undo));
+    """,
 ]
 
 # What each table is for, in the words a brain is given. The order here is the order they are shown in.
 ABOUT = {
     "areas": "The parts of a home Nearby can hold data for. Only network has rows today.",
     "devices": "Every device Nearby has seen, by name and kind, the area it belongs to, and the first and last day it was seen.",
-    "device_days": "One row per device per day: how many names it asked the house phone book for.",
+    "device_days": "One row per device per day: how many names it asked the house phone book for in the day up to the last look.",
     "lookups": "Per device per day, the names it asked for most, with a count each.",
     "findings": "What the detectors noticed, per device per day: a new name, a steady beat, an odd hour.",
     "changes": "Every fix switched on or taken back, by day, and who asked for it.",
@@ -83,21 +95,25 @@ def connect() -> sqlite3.Connection:
     db = sqlite3.connect(DB, timeout=10)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
-    have = db.execute("PRAGMA user_version").fetchone()[0]
-    for step in range(have, len(SCHEMA)):
-        db.executescript(SCHEMA[step])
-        db.execute(f"PRAGMA user_version = {step + 1}")
-    db.executemany("INSERT OR IGNORE INTO areas (name) VALUES (?)", [(a,) for a in AREAS])
-    db.commit()
+    with _opening:  # two openers must not both build the tables
+        have = db.execute("PRAGMA user_version").fetchone()[0]
+        for step in range(have, len(SCHEMA)):
+            # the step and its number land together or not at all, so a crash half way can't leave tables without a number
+            db.executescript(f"BEGIN IMMEDIATE;\n{SCHEMA[step]}\nPRAGMA user_version = {step + 1};\nCOMMIT;")
+        db.executemany("INSERT OR IGNORE INTO areas (name) VALUES (?)", [(a,) for a in AREAS])
+        db.commit()
     return db
 
 
 def sync() -> dict:
     """Write what Nearby knows right now into the tables. Safe to run as often as you like: nothing is counted twice."""
     now = datetime.now().astimezone()
-    stamp, day = now.isoformat(timespec="seconds"), now.date().isoformat()
+    stamp = now.isoformat(timespec="seconds")
     devices = find.load().get("devices", {})
     odd = detectors.latest()
+    day = str(odd.get("at") or "")[:10]  # the day the counts are from, not the day they happen to be written
+    if not day:
+        odd = {}  # no look has been taken yet: nothing to file under a day
     with _lock:
         db = connect()
         try:
@@ -105,8 +121,9 @@ def sync() -> dict:
                 db.execute(
                     """INSERT INTO devices (mac, label, kind, online, first_seen, last_seen) VALUES (?,?,?,?,?,?)
                        ON CONFLICT(mac) DO UPDATE SET label = excluded.label, kind = excluded.kind, online = excluded.online,
-                       last_seen = CASE WHEN excluded.online THEN excluded.last_seen ELSE devices.last_seen END""",
-                    (mac, d.get("label") or "something", d.get("kind") or "unknown", 1 if d.get("online") else 0, stamp, stamp))
+                       first_seen = min(devices.first_seen, excluded.first_seen), last_seen = excluded.last_seen""",
+                    (mac, d.get("label") or "something", d.get("kind") or "unknown", 1 if d.get("online") else 0,
+                     _day(d.get("first_seen"), stamp), _day(d.get("last_seen"), stamp)))
             ids = {r["mac"]: r["id"] for r in db.execute("SELECT id, mac FROM devices")}
             for mac, n in (odd.get("lookups") or {}).items():
                 if mac in ids:
@@ -117,14 +134,22 @@ def sync() -> dict:
                                    [(day, ids[mac], str(name), int(count)) for name, count in names])
             for f in odd.get("findings") or []:
                 if f.get("key") in ids:
-                    db.execute("INSERT OR IGNORE INTO findings (day, device_id, kind, text) VALUES (?,?,?,?)", (day, ids[f["key"]], str(f.get("type", "")), str(f.get("text", ""))))
+                    # one finding per device, kind and subject a day; its words carry a running count, so they are replaced, not added
+                    about = str((f.get("names") or [""])[0]) if f.get("type") == "steady_beat" else ""
+                    db.execute("INSERT INTO findings (day, device_id, kind, about, text) VALUES (?,?,?,?,?) ON CONFLICT(day, device_id, kind, about) DO UPDATE SET text = excluded.text",
+                               (day, ids[f["key"]], str(f.get("type", "")), about, str(f.get("text", ""))))
             for e in fixes.load().get("log") or []:
-                db.execute("INSERT OR IGNORE INTO changes (at, device_id, action, name, undo, by) VALUES (?,?,?,?,?,?)",
-                           (e.get("at", ""), ids.get(e.get("mac")), e.get("action", ""), e.get("name") or "", 1 if e.get("undo") else 0, e.get("by") or "owner"))
+                db.execute("INSERT INTO changes (at, mac, device_id, action, name, undo, by) VALUES (?,?,?,?,?,?,?) ON CONFLICT(at, mac, action, name, undo) DO UPDATE SET device_id = excluded.device_id",
+                           (e.get("at", ""), e.get("mac") or "", ids.get(e.get("mac")), e.get("action", ""), e.get("name") or "", 1 if e.get("undo") else 0, e.get("by") or "owner"))
             db.commit()
             return counts(db)
         finally:
             db.close()
+
+
+def _day(value, fallback: str) -> str:
+    """A stamp from devices.json as given, or the fallback when it is missing or not a string."""
+    return value if isinstance(value, str) and len(value) >= 10 else fallback
 
 
 def counts(db: sqlite3.Connection | None = None) -> dict:

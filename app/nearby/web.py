@@ -416,8 +416,7 @@ ORDER = ["samsung_tv", "google_tv", "roku", "cloud_gadget", "unknown", "game_con
 
 @app.get("/health")
 def health():
-    s = find.load()
-    return {"ok": True, "version": __version__, "last_scan": s.get("last_scan"), "devices": len(s.get("devices", {}))}
+    return {"ok": True, "version": __version__}  # open to anyone in the house, so it says nothing about the house
 
 
 @app.get("/api/devices")
@@ -485,11 +484,11 @@ async def mcp_door(request: Request):
     if not connector.token():
         return JSONResponse({"error": "The connector is off. Set NEARBY_MCP_TOKEN (24 characters or more) in .env to turn it on."}, status_code=404)
     who = request.client.host if request.client else "unknown"
-    if connector.locked(who):
+    if not connector.attempt(who):
         return JSONResponse({"error": "Too many wrong passwords. Try again in ten minutes."}, status_code=429)
     if not connector.allowed(request.headers.get("authorization", "")):
-        connector.strike(who)
         return JSONResponse({"error": "Wrong or missing password."}, status_code=401, headers={"WWW-Authenticate": "Bearer"})
+    connector.forgive(who)
     try:
         body = await request.json()
     except Exception:
@@ -533,16 +532,17 @@ document.getElementById('f').addEventListener('submit',function(ev){{ev.preventD
 def login(p: Password, request: Request):
     """The first password on a fresh box claims it. After that, the password signs you in."""
     who = request.client.host if request.client else "unknown"
-    if owner.locked(who):
+    if not owner.attempt(who):
         return JSONResponse({"error": "Too many wrong passwords. Try again in ten minutes."}, status_code=429)
     try:
         if not owner.is_set():
             owner.choose(p.password)
         elif not owner.check(p.password):
-            owner.strike(who)
             return JSONResponse({"error": "That is not the password."}, status_code=401)
     except owner.Refused as e:
+        owner.forgive(who)  # a password too short to set is not a guess
         return JSONResponse({"error": str(e)}, status_code=400)
+    owner.forgive(who)
     r = JSONResponse({"ok": True})
     r.set_cookie(owner.COOKIE, owner.sign_in(), max_age=owner.SESSION_SECONDS, httponly=True, samesite="strict", path="/")
     return r

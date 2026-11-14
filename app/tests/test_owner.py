@@ -79,3 +79,24 @@ class Lock(unittest.TestCase):
         paths = {r.path for r in web.app.routes if hasattr(r, "methods")}
         self.assertTrue({"/", "/api/fix", "/api/asks", "/mcp", "/login"} <= paths)
         self.assertEqual({p for p in paths if web.open_to_all(p)} - {"/health", "/mcp", "/login", "/api/login"}, set())
+
+    def test_a_try_is_counted_before_the_password_is_looked_at(self):
+        from nearby import connector
+        for lock in (owner, connector):
+            lock._strikes.clear()
+            self.assertEqual([lock.attempt("192.0.2.9") for _ in range(12)], [True] * 10 + [False] * 2)
+            self.assertTrue(lock.attempt("192.0.2.10"))
+            lock.forgive("192.0.2.10")
+            self.assertEqual(lock._strikes["192.0.2.10"], [])
+
+    def test_a_burst_of_guesses_gets_ten_tries_and_no_more(self):
+        import threading
+        owner._strikes.clear()
+        got = []
+        threads = [threading.Thread(target=lambda: got.append(owner.attempt("192.0.2.9"))) for _ in range(120)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        self.assertEqual(got.count(True), 10)
+
+    def test_the_open_health_page_says_nothing_about_the_house(self):
+        self.assertEqual(sorted(web.health()), ["ok", "version"])

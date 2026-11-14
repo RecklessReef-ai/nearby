@@ -28,6 +28,7 @@ SESSION_SECONDS = 30 * 24 * 3600
 MAX_TRIES, LOCK_SECONDS = 10, 600
 _lock = threading.Lock()
 _strikes: dict[str, list[float]] = {}
+_tries = threading.Lock()
 
 
 class Refused(Exception):
@@ -98,6 +99,22 @@ def locked(who: str) -> bool:
 
 def strike(who: str) -> None:
     _strikes.setdefault(who, []).append(time.time())
+
+
+def attempt(who: str) -> bool:
+    """Count one try for this address before the password is looked at. False when it has used them all."""
+    with _tries:
+        if locked(who):
+            return False
+        strike(who)
+        return True
+
+
+def forgive(who: str) -> None:
+    """The password was right: that try does not count against the address."""
+    with _tries:
+        if _strikes.get(who):
+            _strikes[who].pop()
 
 
 def sign_in() -> str:

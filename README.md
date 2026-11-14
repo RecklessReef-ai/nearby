@@ -57,7 +57,7 @@ cd nearby
 - Open `/brains`. **See:** how to connect an assistant, and the house rules every brain is given, each with how code holds it.
 - `curl localhost:8765/api/odd` **See:** what the detectors found on the last look, and which devices are on their first day being heard.
 - Tests: `docker compose run --rm -e NEARBY_DATA=/tmp/t -v "$PWD/app:/app" app python -m unittest discover tests` **See:** 56 pass. One replays a log where one planted beacon trips exactly one detector. Others prove a block and its undo leave the phone book as it was, that the router and Nearby itself can never be blocked, that an assistant's ask changes nothing until the owner says yes, that an address planted in a letter is struck out at the door, and that no code on the box calls a model.
-- Health check: `curl localhost:8765/health` **See:** `{"ok": true, ...}` with the device count.
+- Health check: `curl localhost:8765/health` **See:** `{"ok": true, ...}`. It is the one page open without the password, so it says nothing about the house.
 - Open `/letter` and tap **Write tonight's letter now**. **See:** a short letter about the house in plain words, written on the box by plain code.
 - Without Docker, for the page only: `./dev.sh`.
 

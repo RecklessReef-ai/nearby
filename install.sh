@@ -19,12 +19,24 @@ fi
 
 mkdir -p adguard/conf adguard/work data
 chmod 600 .env    # the door's password lives here
-chmod 700 data    # the home's data: this user and the app only
 if [ ! -f adguard/conf/AdGuardHome.yaml ]; then
   sed "s/__LAN_IP__/$LAN_IP/" adguard/AdGuardHome.template.yaml > adguard/conf/AdGuardHome.yaml
 fi
 
-docker compose up -d --build
+# Build first, while this computer can still look names up. It may be using Nearby's own phone book.
+docker compose build app
+
+# The app runs with almost no rights, so its data folder has to belong to it. Hand the folder over and shut it to everyone else.
+docker compose run --rm --no-deps --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --entrypoint sh app -c 'chown -R 0:0 /data && chmod 700 /data'
+
+# An older install left the phone book's controls open to the whole house with no password. Shut them to this computer only.
+if docker compose run --rm --no-deps --cap-add DAC_OVERRIDE -v "$PWD/adguard/conf:/conf" --entrypoint sh app -c 'grep -Eq "^(bind_host: 0\.0\.0\.0|  address: 0\.0\.0\.0:3000)" /conf/AdGuardHome.yaml'; then
+  say "Closing the phone book's controls to this computer only. Names stop resolving for a few seconds."
+  docker compose stop adguard
+  docker compose run --rm --no-deps --cap-add DAC_OVERRIDE -v "$PWD/adguard/conf:/conf" --entrypoint sh app -c 'sed -i -E "s/^bind_host: 0\.0\.0\.0/bind_host: 127.0.0.1/; s/^(  address: )0\.0\.0\.0:3000/\1127.0.0.1:3000/" /conf/AdGuardHome.yaml'
+fi
+
+docker compose up -d
 
 say "Nearby is up."
 echo "  The page:          http://$LAN_IP:8765"

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import threading
 import time
 
 from . import __version__, counters, detectors, find, fixes, letters, rules, store
@@ -27,6 +28,7 @@ from . import __version__, counters, detectors, find, fixes, letters, rules, sto
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_TRIES, LOCK_SECONDS = 10, 600
 _strikes: dict[str, list[float]] = {}
+_tries = threading.Lock()
 
 TOOLS = [
     {"name": "house",
@@ -82,6 +84,22 @@ def strike(who: str) -> None:
     _strikes.setdefault(who, []).append(time.time())
 
 
+def attempt(who: str) -> bool:
+    """Count one try for this address before the password is looked at. False when it has used them all."""
+    with _tries:
+        if locked(who):
+            return False
+        strike(who)
+        return True
+
+
+def forgive(who: str) -> None:
+    """The password was right: that try does not count against the address."""
+    with _tries:
+        if _strikes.get(who):
+            _strikes[who].pop()
+
+
 WHERE = {
     "beside": "Where Nearby sits: beside the router, as the house's phone book. It knows who is home and which names each gadget asks for. It does not see what a gadget actually sends, and a gadget that carries its own phone book goes around it.",
     "door": "Where Nearby sits: at the door, between the modem and the router. Everything the house sends passes through it.",
@@ -106,10 +124,7 @@ def house() -> tuple[str, dict, dict]:
         lines.append(f"- {label} ({d['kind'].replace('_', ' ')}): " + (f"can be {' or '.join('quieted' if a == 'quiet' else 'blocked' for a in can)}" if can else "can only be watched")
                      + (f"; on now: {', '.join(on)}" if on else ""))
     lines += ["", WHERE.get(os.environ.get("NEARBY_SEAT", "beside"), WHERE["beside"])]
-    text = "\n".join(lines)
-    if counters.has_address(text):
-        raise ValueError("the house summary contains an address or a timestamp; refusing to send")
-    return text, summary, by_label
+    return "\n".join(lines), summary, by_label  # read() strikes out anything shaped like an address before it leaves
 
 
 def read() -> tuple[str, dict, dict]:

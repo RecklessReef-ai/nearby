@@ -81,3 +81,75 @@ class Tables(unittest.TestCase):
         db.commit(); db.close()
         self.assertIn("power | house draw | 1.2 | kW", store.rows("readings"))
         self.assertIn("Lights out | power | nobody is home | turn the lights off | 0", store.rows("automations"))
+
+
+class ReviewFixes(unittest.TestCase):
+    setUp = Tables.setUp
+
+    def test_a_finding_whose_count_keeps_rising_stays_one_row(self):
+        for n in (100, 101, 102):
+            odd = dict(ODD, findings=[{"key": TV, "label": "Living room TV", "type": "steady_beat", "text": f"asks for x.example on a steady beat, {n} times in the last day.", "names": ["x.example"]}])
+            detectors.ODD.write_text(json.dumps(odd))
+            got = store.sync()
+        self.assertEqual(got["findings"], 1)
+        self.assertIn("102 times", store.rows("findings"))
+
+    def test_a_change_to_a_device_no_longer_known_is_not_repeated(self):
+        log = dict(LOG, log=LOG["log"] + [{"at": "2026-11-13T08:00:00-06:00", "mac": "aa:aa:aa:aa:aa:99", "label": "gone", "action": "block", "undo": False}])
+        fixes.FIXES.write_text(json.dumps(log))
+        for _ in range(3):
+            got = store.sync()
+        self.assertEqual(got["changes"], 2)
+        self.assertIn("a device no longer seen | block", store.rows("changes"))
+        self.assertNotIn("aa:aa:aa:aa:aa:99", store.rows("changes"))
+
+    def test_first_and_last_seen_come_from_the_house_not_from_the_moment_of_writing(self):
+        devices = {TV: dict(DEVICES[TV], online=False, first_seen="2026-09-01T10:00:00", last_seen="2026-10-01T10:00:00")}
+        find.DEVICES_FILE.write_text(json.dumps({"devices": devices, "last_scan": "x"}))
+        store.sync()
+        self.assertIn("Living room TV | samsung_tv | network | 0 | 2026-09-01 | 2026-10-01", store.rows("devices"))
+
+    def test_counts_are_filed_under_the_day_they_are_from(self):
+        detectors.ODD.write_text(json.dumps(dict(ODD, at="2026-11-13T23:50:00-06:00")))
+        store.sync()
+        self.assertIn("2026-11-13 | Living room TV | 774", store.rows("device_days"))
+        detectors.ODD.unlink()
+        store.DB.unlink()
+        self.assertEqual(store.sync()["device_days"], 0)
+
+    def test_many_first_openers_at_once_build_the_tables_once(self):
+        import threading
+        errors = []
+
+        def go():
+            try:
+                store.rows("devices")
+            except Exception as e:
+                errors.append(repr(e))
+        for _ in range(5):
+            store.DB.unlink(missing_ok=True)
+            threads = [threading.Thread(target=go) for _ in range(16)]
+            [t.start() for t in threads]
+            [t.join() for t in threads]
+        self.assertEqual(errors, [])
+
+    def test_an_upgrade_from_the_first_layout_keeps_working(self):
+        import sqlite3
+        db = sqlite3.connect(store.DB)
+        db.executescript(store.SCHEMA[0] + "PRAGMA user_version = 1;")
+        db.close()
+        self.assertEqual(store.sync()["changes"], 1)
+
+    def test_an_address_hidden_in_a_device_name_is_struck_out_at_the_door(self):
+        from nearby import rules
+        devices = {TV: dict(DEVICES[TV], label="shelly1-AABBCC000002"), PLUG: dict(DEVICES[PLUG], label="ip-192-168-0-7", online=True)}
+        find.DEVICES_FILE.write_text(json.dumps({"devices": devices, "last_scan": "x"}))
+        store.sync()
+        from nearby import counters
+        counters.fetch_log = lambda *a, **k: []
+        for tool, args in (("rows", {"table": "devices"}), ("house", {}), ("fixes", {})):
+            text, err = connector.call(tool, args)
+            self.assertFalse(err, text)
+            self.assertNotIn("AABBCC000002", text, tool)
+            self.assertNotIn("192-168-0-7", text, tool)
+        self.assertIn(rules.STRUCK, connector.call("rows", {"table": "devices"})[0])

@@ -191,6 +191,28 @@ def identify(ip: str, mac: str, me: str, gw: str) -> dict:
     return d
 
 
+def clean(text: str, limit: int = 40) -> str:
+    """A name as a device gave it, made safe to show and to hand to a model: letters, digits and a little punctuation, cut short.
+    A gadget chooses its own name, so a name must never be able to carry markup or a paragraph of instructions."""
+    return " ".join(re.sub(r"[^\w .'()+-]", " ", str(text or "")).split())[:limit].strip()
+
+
+def by_ip(state: dict) -> dict:
+    """Which device holds each address right now. A device that is home wins over one that left and had the address before."""
+    out: dict = {}
+    for d in sorted(state.get("devices", {}).values(), key=lambda d: bool(d.get("online"))):
+        out[d["ip"]] = d
+    return out
+
+
+def save(path, obj) -> None:
+    """Write a file whole or not at all, so a reader never sees half of it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2))
+    os.replace(tmp, path)
+
+
 def remember(old: dict, new: dict) -> dict:
     """A gadget Nearby has recognised stays recognised. A sleeping TV closes the port it was named by;
     the same hardware address is still the same TV, so its kind, name and facts are kept."""
@@ -220,6 +242,8 @@ def scan() -> dict:
     for r in results:
         old = state["devices"].get(r["mac"], {})
         remember(old, r)
+        r["label"] = clean(r.get("label")) or "something new"
+        r["dhcp_name"] = clean(r.get("dhcp_name"))
         r["first_seen"] = old.get("first_seen", now)
         r["last_seen"] = now
         r["is_new"] = not old
@@ -227,8 +251,7 @@ def scan() -> dict:
     for mac, d in state["devices"].items():
         d["online"] = d["last_seen"] == now
     state.update(last_scan=now, lan=net, me=me, gateway=gw)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DEVICES_FILE.write_text(json.dumps(state, indent=2))
+    save(DEVICES_FILE, state)
     return state
 
 

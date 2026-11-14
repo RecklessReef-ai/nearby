@@ -91,8 +91,8 @@ def proof_today(model: str = MODEL) -> dict | None:
 
 def morning_check(model: str = MODEL, force: bool = False) -> dict:
     """Fetch a fresh attestation with our nonce and check every candidate. Cached per day."""
-    if not force and (p := proof_today(model)):
-        return p
+    if not force and (p := proof_today(model)) and p.get("ok"):
+        return p  # a failed check is tried again; a passed one stands for the day
     proof = {"date": today(), "model": model, "ok": False, "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "candidates": []}
     if model not in SEALED_MODELS:
         proof["error"] = f"{model} is not on the sealed list"

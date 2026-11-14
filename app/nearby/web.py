@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from datetime import datetime
 
-from . import __version__, brain, chat, connector, detectors, find, fixes, housekey, letters
+from . import __version__, brain, chat, connector, counters, detectors, find, fixes, housekey, letters
 from .cards import card
 
 SCAN_EVERY = int(os.environ.get("SCAN_EVERY", "10")) * 60
@@ -36,8 +36,7 @@ def _loop() -> None:
         except Exception as e:  # keep sweeping no matter what
             print("scan failed:", e)
         try:
-            if fixes.load()["active"]:
-                fixes.sync()  # a blocked gadget that changed address stays blocked
+            fixes.resync()  # a blocked gadget that changed address stays blocked; one that left loses its rule
         except Exception as e:
             print("fix sync failed:", e)
         try:
@@ -71,6 +70,32 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Nearby", version=__version__, lifespan=lifespan)
+
+
+def _own_address(host: str) -> bool:
+    """Nearby is reached by its number on the home network, by localhost, or by a .local name. Never by a website's name."""
+    name = host.rsplit(":", 1)[0].strip("[]") if host.count(":") == 1 or host.startswith("[") else host
+    if name in ("localhost",) or name.endswith(".local"):
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
+
+
+@app.middleware("http")
+async def home_only(request: Request, call_next):
+    """A website open in the house must not be able to read Nearby or press its buttons.
+    It can't use Nearby's number (the browser stops it), so it would have to arrive under its own name: refused.
+    And a post must come from Nearby's own page, or from a program in the house that sends no origin at all."""
+    host = request.headers.get("host", "")
+    if not _own_address(host):
+        return JSONResponse({"error": "Nearby only answers at its own address on the home network."}, status_code=403)
+    origin = request.headers.get("origin")
+    if request.method != "GET" and origin and urlparse(origin).netloc != host:
+        return JSONResponse({"error": "That only works from Nearby's own page."}, status_code=403)
+    return await call_next(request)
 
 STYLE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -140,6 +165,8 @@ button:disabled{opacity:.5;cursor:default}
 .feel{font-style:italic;color:var(--muted);margin-top:10px!important}
 .tech{font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);overflow-wrap:anywhere}
 .row{display:flex;flex-wrap:wrap;gap:10px}
+.ask{background:var(--warn-soft);border:1px solid var(--warn);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.ask p{margin:0}.ask .q{font-size:17px;font-weight:650}.ask .row button{flex:1;min-height:44px}
 .wall{padding:14px 16px;border:1px dashed var(--line);border-radius:14px;color:var(--muted);font-size:15px}
 .wall strong{color:var(--fg)}
 .paper{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 20px;font-size:18px;line-height:1.6}
@@ -296,6 +323,13 @@ function tap(b,mac,action,undo,name){b.disabled=true;
  .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})})
  .then(function(x){if(x.ok){location.hash=mac.replace(/:/g,'');location.reload()}else{b.disabled=false;(b.closest('.card')||document).querySelector('.err').textContent=x.j.error||'That did not work. Nothing was changed.'}})
  .catch(function(){b.disabled=false})}
+function answer(b,id,yes){b.disabled=true;
+ fetch('/api/asks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,yes:yes})})
+ .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})})
+ .then(function(x){if(x.ok){location.reload()}else{b.disabled=false;b.closest('.ask').querySelector('.err').textContent=x.j.error||'That did not work. Nothing was changed.'}})
+ .catch(function(){b.disabled=false})}
+(function(){var box=document.getElementById('asks');if(!box)return;var seen=box.getAttribute('data-n');
+ setInterval(function(){fetch('/api/asks').then(function(r){return r.json()}).then(function(a){if(String(a.length)!==seen)location.reload()}).catch(function(){})},8000)})();
 function openCard(){var h=location.hash.slice(1),d=h&&(document.getElementById(h)||document.getElementById('d'+h));if(d&&d.tagName==='DETAILS'){d.open=true;d.scrollIntoView({block:'start'})}}
 window.addEventListener('hashchange',openCard);openCard();
 </script>"""
@@ -317,8 +351,8 @@ def names_html(d: dict, on: dict, asked: list) -> str:
     """The sites this gadget asked for in the last day, each with its own stop. One name, one gadget, nothing else touched."""
     if d["kind"] in fixes.NEVER:
         return ""
-    stopped = on.get("names") or {}
-    counts = {site: n for site, n in asked}
+    stopped = {site: v for site, v in (on.get("names") or {}).items() if counters.is_site(site)}
+    counts = {site: n for site, n in asked if counters.is_site(site)}
     rows = []
     for site in list(stopped) + [s for s in counts if s not in stopped]:
         mac, safe = html.escape(d["mac"]), html.escape(site)
@@ -381,6 +415,25 @@ def fix(t: Tap, request: Request):
         return JSONResponse({"error": "Taps only work from Nearby's own page."}, status_code=403)
     try:
         return fixes.tap(t.mac, t.action, t.undo, t.name)
+    except fixes.Refused as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+class Answer(BaseModel):
+    id: str
+    yes: bool
+
+
+@app.get("/api/asks")
+def asks_waiting():
+    return [{"id": a["id"], "text": a["text"], "who": a.get("who", "an assistant")} for a in fixes.asks()]
+
+
+@app.post("/api/asks")
+def answer_ask(a: Answer):
+    """The owner's yes or no to something an assistant asked for."""
+    try:
+        return fixes.decide(a.id, a.yes)
     except fixes.Refused as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -672,6 +725,10 @@ def page():
     else:
         headline = f"<b>{n}</b> thing{'s' if n != 1 else ''} in your house {'are' if n != 1 else 'is'} talking to the internet right now."
         sub = "Tap one to see what it is and what you can do."
+    waiting = fixes.asks()
+    asks_html = "".join(f"""<div class="ask"><p class="eyebrow">{html.escape(a.get('who', 'an assistant')).capitalize()} is asking</p><p class="q">{html.escape(a['text'])}?</p>
+<p class="sub">Nothing has changed. It only happens if you say yes, and you can undo it afterwards.</p>
+<div class="row"><button class="do" onclick="answer(this,'{html.escape(a['id'])}',true)">Yes, do it</button><button onclick="answer(this,'{html.escape(a['id'])}',false)">No</button></div><p class="err"></p></div>""" for a in waiting)
     n_learning = len(noticed_all["learning"])
     learning = (f"the detectors heard {noticed_all['heard']} devices; {n_learning} are on their first day, so 'new' and 'usual' start tomorrow for them"
                 if n_learning else f"the detectors heard {noticed_all['heard']} devices")
@@ -715,6 +772,7 @@ def page():
   </div>
 </details>""")
     return STYLE + f"""<main>{top('house')}
+<div id="asks" data-n="{len(waiting)}">{asks_html}</div>
 <div class="hero"><h1>{headline}</h1><p class="sub">{html.escape(sub)}</p></div>
 {map_svg(devs, active, noticed_by, noticed_all["lookups"]) if s.get("last_scan") else ""}
 <div class="list">{''.join(items)}</div>

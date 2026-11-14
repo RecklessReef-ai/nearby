@@ -9,6 +9,9 @@ because that is the one door Nearby holds today. Nothing here logs into the rout
          Only a site the device has really asked for can be stopped, so nothing can be blocked on a guess.
   fence  keep a device away from the others: needs the router, so it is a step list, not a tap
 
+An assistant connected through the MCP door cannot make any of these changes. It can only ask. The ask waits
+in data/asks.json until the owner says yes or no on Nearby's page, and it lapses after fifteen minutes.
+
 What is on is kept in data/fixes.json and rebuilt into the phone book from there,
 so undo is exact: remove the entry, rebuild. Nearby only ever touches its own
 marked block of rules and the lists it switched on itself.
@@ -19,16 +22,20 @@ still get out. Only a box at the door stops that.
 """
 from __future__ import annotations
 
+import copy
 import json
+import secrets
 import threading
+import time
 from datetime import datetime
 from urllib.request import Request, urlopen
-
-import re
 
 from . import counters, detectors, find
 
 FIXES = find.DATA_DIR / "fixes.json"
+ASKS = find.DATA_DIR / "asks.json"
+ASK_MINUTES = 15
+ASK_MAX = 5
 BEGIN = "! Nearby fixes: begin. Managed by Nearby; changes between these lines are overwritten."
 END = "! Nearby fixes: end."
 
@@ -37,10 +44,9 @@ QUIET_LISTS = {
     "samsung_tv": ("https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/native.samsung.txt", "Quiet the Samsung TV (hagezi native list)"),
     "roku": ("https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/native.roku.txt", "Quiet a Roku (hagezi native list)"),
 }
-_SITE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
-NEVER = {"this_computer", "router"}
+NEVER = {"this_computer", "router"}  # blocking these takes the whole house down
 PEOPLE = {"phone", "phone_or_laptop"}  # people browse; a name fence would break their day
-FENCE_MAX = 12  # blocking these takes the whole house down
+FENCE_MAX = 12
 _lock = threading.Lock()
 
 
@@ -71,8 +77,7 @@ def load() -> dict:
 
 
 def _save(s: dict) -> None:
-    find.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    FIXES.write_text(json.dumps(s, indent=2))
+    find.save(FIXES, s)
 
 
 def can(dev: dict) -> list[str]:
@@ -86,23 +91,27 @@ def fence_names(dev: dict) -> list[str]:
     """The sites a name fence would allow for this gadget, or [] when a fence doesn't fit it."""
     if dev.get("kind") in NEVER | PEOPLE:
         return []
-    sites = [s for s in counters.ever_asked(dev["mac"]) if _SITE.match(s)]
+    sites = [s for s in counters.ever_asked(dev["mac"]) if counters.is_site(s)]
     return sites if 0 < len(sites) <= FENCE_MAX else []
 
 
 def block_rules(active: dict, devices: dict) -> list[str]:
-    """One phone-book rule per blocked device, by its address today. Pure."""
+    """Nearby's phone-book rules, by each device's address today. Pure.
+    A device that is not home gets no rule: its old address may belong to something else by now. The rule comes back when it does."""
     rules = []
     for mac in sorted(active):
-        ip = (devices.get(mac) or {}).get("ip")
-        if not ip or devices[mac].get("kind") in NEVER:
+        dev = devices.get(mac) or {}
+        ip = dev.get("ip")
+        if not ip or dev.get("kind") in NEVER or not dev.get("online", True):
             continue
+        stopped = [site for site in sorted(active[mac].get("names") or {}) if counters.is_site(site)]
         if "block" in active[mac]:
             rules.append(f"||*^$client={ip}")
         elif "only" in active[mac]:
             rules.append(f"||*^$client={ip}")
-            rules += [f"@@||{site}^$client={ip}" for site in active[mac]["only"].get("sites", []) if _SITE.match(site)]
-        rules += [f"||{site}^$client={ip}" for site in sorted(active[mac].get("names") or {}) if _SITE.match(site)]
+            # a name the owner stopped stays stopped inside a fence: it simply isn't let back in
+            rules += [f"@@||{site}^$client={ip}" for site in active[mac]["only"].get("sites", []) if counters.is_site(site) and site not in stopped]
+        rules += [f"||{site}^$client={ip}" for site in stopped]
     return rules
 
 
@@ -128,6 +137,8 @@ def sync(s: dict | None = None) -> dict:
     """Make the phone book match data/fixes.json. Safe to call any time; follows a device whose address changed."""
     s = s or load()
     devices = find.load().get("devices", {})
+    if not devices:
+        return s  # no picture of the house yet: leave the phone book exactly as it is
     status = _api("filtering/status")
 
     rules = merge_rules(status.get("user_rules") or [], block_rules(s["active"], devices))
@@ -160,62 +171,124 @@ def sync(s: dict | None = None) -> dict:
     return s
 
 
-def tap(mac: str, action: str, undo: bool = False, name: str | None = None) -> dict:
+def resync() -> None:
+    """The regular check that the phone book still matches what the owner chose. Takes the same lock as a tap, so the two never cross."""
+    with _lock:
+        _save(sync(load()))
+
+
+def _apply(s: dict, dev: dict, action: str, undo: bool, name: str | None, by: str) -> None:
+    """Change the record of what is on, in place. Raises Refused for anything Nearby won't do. Touches nothing outside `s`."""
+    mac, label = dev["mac"], dev.get("label") or "device"
+    if action == "fence":
+        raise Refused("Fencing needs the router. Follow the steps on the card.")
+    on = s["active"].setdefault(mac, {})
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    entry = {"at": now, "mac": mac, "label": dev.get("label", ""), "action": action, "undo": undo, "by": by}
+    if action == "name":
+        site = (name or "").strip().lower().rstrip(".")
+        stopped = on.setdefault("names", {})
+        if dev.get("kind") in NEVER or not counters.is_site(site):
+            raise Refused(f"Nearby can't stop that name for the {label}.")
+        asked = {n for n, _ in detectors.latest()["names"].get(mac, [])}
+        if not undo and site not in asked:
+            raise Refused(f"The {label} hasn't asked for {site}, so there is nothing to stop.")
+        if undo:
+            stopped.pop(site, None)
+        else:
+            stopped[site] = {"at": now}
+        if not stopped:
+            del on["names"]
+        entry["name"] = site
+    elif action == "only":
+        if undo:
+            on.pop("only", None)
+        else:
+            sites = fence_names(dev)
+            if not sites:
+                raise Refused(f"A name fence doesn't fit the {label}: it uses too many sites, or Nearby hasn't heard it yet.")
+            on["only"] = {"at": now, "label": dev.get("label", ""), "sites": sites}
+    elif action not in can(dev):
+        raise Refused(f"Nearby can't {action} the {label}.")
+    elif undo:
+        on.pop(action, None)
+    else:
+        on[action] = {"at": now, "label": dev.get("label", "")}
+    if not on:
+        del s["active"][mac]
+    s["log"] = (s["log"] + [entry])[-200:]
+
+
+def tap(mac: str, action: str, undo: bool = False, name: str | None = None, by: str = "owner") -> dict:
     """Do one fix, or take it back. Raises Refused with plain words when it can't."""
     with _lock:
-        devices = find.load().get("devices", {})
-        dev = devices.get(mac)
+        dev = find.load().get("devices", {}).get(mac)
         if not dev:
             raise Refused("Nearby doesn't know that device any more. Look again, then try.")
-        if action == "fence":
-            raise Refused("Fencing needs the router. Follow the steps on the card.")
         s = load()
-        before = json.dumps(s)
-        on = s["active"].setdefault(mac, {})
-        now = datetime.now().astimezone().isoformat(timespec="seconds")
-        entry = {"at": now, "mac": mac, "label": dev.get("label", ""), "action": action, "undo": undo}
-        if action == "name":
-            site = (name or "").strip().lower().rstrip(".")
-            stopped = on.setdefault("names", {})
-            if dev.get("kind") in NEVER or not _SITE.match(site):
-                raise Refused(f"Nearby can't stop that name for the {dev.get('label') or 'device'}.")
-            asked = {n for n, _ in detectors.latest()["names"].get(mac, [])}
-            if not undo and site not in asked:
-                raise Refused(f"The {dev.get('label') or 'device'} hasn't asked for {site}, so there is nothing to stop.")
-            if undo:
-                stopped.pop(site, None)
-            else:
-                stopped[site] = {"at": now}
-            if not stopped:
-                del on["names"]
-            entry["name"] = site
-        elif action == "only":
-            if undo:
-                on.pop("only", None)
-            else:
-                sites = fence_names(dev)
-                if not sites:
-                    raise Refused(f"A name fence doesn't fit the {dev.get('label') or 'device'}: it uses too many sites, or Nearby hasn't heard it yet.")
-                on["only"] = {"at": now, "label": dev.get("label", ""), "sites": sites}
-        elif action not in can(dev):
-            raise Refused(f"Nearby can't {action} the {dev.get('label') or 'device'}.")
-        elif undo:
-            on.pop(action, None)
-        else:
-            on[action] = {"at": now, "label": dev.get("label", "")}
-        if not on:
-            del s["active"][mac]
-        s["log"] = (s["log"] + [entry])[-200:]
+        before = copy.deepcopy(s)
+        _apply(s, dev, action, undo, name, by)
         try:
             s = sync(s)
         except Exception as e:
             try:
-                sync(json.loads(before))  # put the phone book back the way it was
+                sync(before)  # put the phone book back the way it was
             except Exception:
-                pass
+                raise Refused(f"The phone book stopped answering part-way, so Nearby can't be sure what it holds. It checks again within ten minutes and puts it right. ({e})")
             raise Refused(f"The phone book didn't answer, so nothing was changed. ({e})")
         _save(s)
         return {"ok": True, "mac": mac, "active": s["active"].get(mac, {})}
+
+
+# ---------- asks: how an assistant gets a change made ----------
+
+def describe(action: str, undo: bool, label: str, name: str | None = None) -> str:
+    it = label if label.lower().startswith(("a ", "an ", "the ", "something")) else f"the {label}"
+    what = {"quiet": f"quiet {it}", "block": f"block {it}", "only": f"fence the names {it} may ask for",
+            "name": f"stop {name} for {it}"}.get(action, f"{action} {it}")
+    return ("Undo: " + what) if undo else what[0].upper() + what[1:]
+
+
+def asks() -> list[dict]:
+    """The asks still waiting for the owner. Old ones lapse by themselves."""
+    try:
+        waiting = json.loads(ASKS.read_text())
+    except (OSError, ValueError):
+        waiting = []
+    return [a for a in waiting if time.time() - a.get("at", 0) < ASK_MINUTES * 60]
+
+
+def ask(mac: str, action: str, undo: bool = False, name: str | None = None, who: str = "an assistant") -> dict:
+    """An assistant asks for a change. Nothing is changed. Raises Refused for anything Nearby wouldn't do even with a yes."""
+    with _lock:
+        dev = find.load().get("devices", {}).get(mac)
+        if not dev:
+            raise Refused("Nearby doesn't know that device any more.")
+        _apply(copy.deepcopy(load()), dev, action, undo, name, who)  # a dry run on a copy: the same rules as a real tap
+        waiting = asks()
+        for a in waiting:
+            if (a["mac"], a["action"], a["undo"], a.get("name")) == (mac, action, undo, name):
+                return a
+        if len(waiting) >= ASK_MAX:
+            raise Refused(f"{ASK_MAX} asks are already waiting for the owner. Wait for an answer before asking for more.")
+        new = {"id": secrets.token_hex(6), "at": time.time(), "mac": mac, "action": action, "undo": undo, "name": name, "who": who,
+               "text": describe(action, undo, dev.get("label") or "device", name)}
+        find.save(ASKS, waiting + [new])
+        return new
+
+
+def decide(ask_id: str, yes: bool) -> dict:
+    """The owner's answer to one ask. A yes makes the change, exactly as a tap would. A no drops it."""
+    with _lock:
+        waiting = asks()
+        mine = next((a for a in waiting if a["id"] == ask_id), None)
+        if not mine:
+            raise Refused("That ask is gone. It was answered already, or it waited too long.")
+        find.save(ASKS, [a for a in waiting if a["id"] != ask_id])
+    if not yes:
+        return {"ok": True, "done": False, "text": mine["text"]}
+    tap(mine["mac"], mine["action"], mine["undo"], mine.get("name"), by=mine.get("who", "an assistant"))
+    return {"ok": True, "done": True, "text": mine["text"]}
 
 
 def fence_steps(router_maker: str = "") -> list[str]:

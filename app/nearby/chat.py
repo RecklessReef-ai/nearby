@@ -119,6 +119,8 @@ def answer(question: str, history: list | None = None) -> dict:
     prompt = text + ("\n\nEarlier in this talk:\n" + said if said else "") + "\n\nThe owner asks: " + q
     try:
         got = brain.ask(prompt, proof, system=SYSTEM)
+        if not str(got["verified"]).startswith("verified"):
+            raise RuntimeError("the reply's signature could not be checked: " + str(got["verified"]))
     except Exception as e:
         return _local(str(e), summary)
     out = parse(got["text"], by_label)

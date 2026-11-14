@@ -2,7 +2,7 @@
 
 It is an Ed25519 key pair, which is what a NEAR account uses, so the house has
 a NEAR address from day one (the implicit account: the public key in hex).
-Nothing is written on-chain. The key signs every letter and every proof file.
+Nothing is written on-chain. The key signs every letter.
 """
 from __future__ import annotations
 

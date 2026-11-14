@@ -123,6 +123,45 @@ class Fixes(unittest.TestCase):
         self.assertEqual(fixes.fence_names({"mac": "p", "kind": "phone"}), [])
         self.assertEqual(self.book.rules, ["||my-own-rule.example^"])
 
+    def test_a_gadget_that_left_takes_its_rule_with_it(self):
+        fixes.tap(PLUG, "block")
+        gone = json.loads(json.dumps(DEVICES)); gone[PLUG]["online"] = False
+        gone["aa:aa:aa:aa:aa:99"] = {"ip": "192.168.0.46", "mac": "aa:aa:aa:aa:aa:99", "kind": "phone", "label": "iPhone", "online": True}  # a phone got its old address
+        find.DEVICES_FILE.write_text(json.dumps({"devices": gone}))
+        fixes.resync()
+        self.assertEqual(self.book.rules, ["||my-own-rule.example^"])          # the phone is not blocked by mistake
+        self.assertEqual(find.by_ip({"devices": gone})["192.168.0.46"]["label"], "iPhone")
+        gone[PLUG]["online"] = True; gone[PLUG]["ip"] = "192.168.0.47"
+        find.DEVICES_FILE.write_text(json.dumps({"devices": gone}))
+        fixes.resync()
+        self.assertIn("||*^$client=192.168.0.47", self.book.rules)             # it comes home, the block comes back
+
+    def test_a_stopped_name_stays_stopped_inside_a_name_fence(self):
+        fixes.counters.BASELINE.write_text(json.dumps({PLUG: {"hatchbaby.com": "x", "aws.com": "x"}}))
+        fixes.detectors.ODD.write_text(json.dumps({"names": {PLUG: [["aws.com", 162]]}}))
+        fixes.tap(PLUG, "only")
+        fixes.tap(PLUG, "name", name="aws.com")
+        self.assertNotIn("@@||aws.com^$client=192.168.0.46", self.book.rules)
+        self.assertIn("@@||hatchbaby.com^$client=192.168.0.46", self.book.rules)
+        self.assertIn("||aws.com^$client=192.168.0.46", self.book.rules)
+
+    def test_only_a_plain_site_name_counts_as_one(self):
+        for bad in ("evil.com\n", "x.'+alert`1`+'.com", "a b.com", "", "com", "-a.com", "a..com", "ex ample.com$important"):
+            self.assertFalse(fixes.counters.is_site(bad), bad)
+        for good in ("example.com", "a-b.co.uk", "1.example.org"):
+            self.assertTrue(fixes.counters.is_site(good), good)
+
+    def test_the_scrubber_knows_every_shape_of_address_and_time(self):
+        for leak in ("fe80::1c2d:3e4f", "AA-BB-CC-DD-EE-FF", "at 03:14 it woke", "2026-11-14T03:14", "10.0.0.7"):
+            self.assertTrue(fixes.counters.has_address(leak), leak)
+        self.assertFalse(fixes.counters.has_address("Office TV: 774 lookups, 45 different names, asks for hulu.com about every 5 minutes"))
+
+    def test_no_picture_of_the_house_means_hands_off_the_phone_book(self):
+        fixes.tap(PLUG, "block")
+        find.DEVICES_FILE.write_text("{")                                      # a half-written file
+        fixes.resync()
+        self.assertIn("||*^$client=192.168.0.46", self.book.rules)
+
     def test_a_sleeping_tv_is_still_the_tv(self):
         awake = {"kind": "samsung_tv", "label": "Samsung AU8000 43 TV", "facts": {"modelName": "UN43AU8000FXZA"}}
         asleep = find.remember(awake, {"kind": "unknown", "label": "Samsung device", "facts": {}, "ip": "192.168.0.70"})

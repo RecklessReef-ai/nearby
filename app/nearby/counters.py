@@ -19,7 +19,13 @@ ADGUARD = os.environ.get("ADGUARD_URL") or f"http://{find.load().get('me') or '1
 BASELINE = find.DATA_DIR / "baseline.json"
 TOP_N = 8
 _TWO_LEVEL = {"co", "com", "net", "org", "gov", "ac", "edu"}
-_ADDRESS = re.compile(r"\b(\d{1,3}\.){3}\d{1,3}\b|\b([0-9a-f]{2}:){5}[0-9a-f]{2}\b|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", re.I)
+_ADDRESS = re.compile(r"\b(\d{1,3}\.){3}\d{1,3}\b|\b([0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b|\b[0-9a-f]{1,4}(::?[0-9a-f]{1,4}){2,7}\b|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|\b\d{1,2}:\d{2}\b", re.I)
+_SITE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+")
+
+
+def is_site(name: str) -> bool:
+    """True for a plain site name like example.co.uk, and nothing else. Anything that is not one never reaches a rule, a page or a model."""
+    return bool(_SITE.fullmatch(name or ""))
 
 
 def registrable(name: str) -> str:
@@ -105,7 +111,7 @@ def summarize(day: date | None = None, update_baseline: bool = True) -> dict:
     day = day or now.date()
     start = datetime(day.year, day.month, day.day).astimezone()
     state = find.load()
-    by_ip = {d["ip"]: d for d in state.get("devices", {}).values()}
+    by_ip = find.by_ip(state)
     log = fetch_log(start) if day == now.date() else []
 
     per: dict[str, dict] = defaultdict(lambda: {"lookups": 0, "blocked": 0, "names": Counter()})

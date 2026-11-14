@@ -139,7 +139,7 @@ def run(now: datetime | None = None) -> list[dict]:
     now = now or datetime.now().astimezone()
     today = now.date().isoformat()
     state = find.load()
-    by_ip = {d["ip"]: d for d in state.get("devices", {}).values()}
+    by_ip = find.by_ip(state)
     entries = counters.fetch_log(now - timedelta(hours=24))
 
     names_today: dict[str, list[str]] = defaultdict(list)
@@ -160,7 +160,7 @@ def run(now: datetime | None = None) -> list[dict]:
     asked: dict[str, Counter] = defaultdict(Counter)  # the sites each device asked for in the last day, for the card and the single-name block
     for e in entries:
         site = counters.registrable((e.get("question") or {}).get("name", "").lower().rstrip("."))
-        if "." in site:
+        if counters.is_site(site):
             asked[counters.device_key(e.get("client", ""), by_ip)][site] += 1
     names = {k: c.most_common(15) for k, c in asked.items()}
     learning = sorted(k for k in tonight if not known.get(k))  # first day being heard: nothing to compare with yet

@@ -37,7 +37,7 @@ Beside the router, Nearby hears the names a gadget asks for. It does not see wha
 
 **Code watches, the model explains.** The model is shown counters only: how many names a device asked for, which, what was new. Never an address, never a time, never a log line; a scrubber refuses to send anything that looks like one. The model may only suggest from a fixed menu (quiet, fence, block, ask, none) and only about devices it was told about; anything else is dropped in code. Caps on tokens and dollars live outside the model.
 
-**The house's own key** (`app/nearby/housekey.py`). On first run Nearby makes an Ed25519 key pair. That is a NEAR key, so the house has a NEAR implicit account from day one with no sign-up. The key signs every letter and every proof. Nothing is written on-chain.
+**The house's own key** (`app/nearby/housekey.py`). On first run Nearby makes an Ed25519 key pair. That is a NEAR key, so the house has a NEAR implicit account from day one with no sign-up. The key signs every letter. Nothing is written on-chain.
 
 Tracks: `security`, `agents`, `privacy`.
 
@@ -61,7 +61,7 @@ cd nearby
 - Open `/ask` and tap a question. **See:** an answer from the sealed brain with any suggestion as a button. It is slow today, up to two minutes. Without a key it answers locally and says so.
 - Open `/brains`. **See:** the brains you can choose, in plain words, and how to connect your own assistant.
 - `curl localhost:8765/api/odd` **See:** what the detectors found on the last look, and which devices are on their first day being heard.
-- Tests: `docker compose run --rm -e NEARBY_DATA=/tmp/t -v "$PWD/app:/app" app python -m unittest discover tests` **See:** 33 pass. One replays a log where one planted beacon trips exactly one detector. Others prove a block and its undo leave the phone book as it was, and that the router and Nearby itself can never be blocked.
+- Tests: `docker compose run --rm -e NEARBY_DATA=/tmp/t -v "$PWD/app:/app" app python -m unittest discover tests` **See:** 41 pass. One replays a log where one planted beacon trips exactly one detector. Others prove a block and its undo leave the phone book as it was, that the router and Nearby itself can never be blocked, and that an assistant's ask changes nothing until the owner says yes.
 - Health check: `curl localhost:8765/health` **See:** `{"ok": true, ...}` with the device count.
 - Open `/letter` and tap **Write tonight's letter now**. **See:** a short letter about the house in plain words. With no NEAR AI Cloud key it says it was written locally, and why. Every letter is signed by the house key.
 - Put a NEAR AI Cloud key in `.env` as `NEAR_AI_API_KEY`, restart (`docker compose up -d`), open `/letter`, tap **Check the seal**. **See:** `data/proofs/<today>.json` with the checks that passed, and the next letter says "written in a sealed room on NEAR AI Cloud".
@@ -84,10 +84,10 @@ install.sh                one command: .env, AdGuard config, docker compose up
 docker-compose.yml        adguard (host network, :53 and :3000) + app (host network, :8765)
 app/nearby/find.py        the finder: sweep, neighbour table, identity ports, DHCP names, maker table
 app/nearby/cards.py       the plain-word cards, one per kind of device
-app/nearby/web.py         the pages (/, /letter) and a small API (/api/devices, /api/scan, /api/fix, /api/odd, /api/brain, /api/letter, /health)
+app/nearby/web.py         the pages (/, /ask, /brains, /letter), the MCP door (/mcp) and a small API (/api/devices, /api/scan, /api/fix, /api/fixes, /api/asks, /api/odd, /api/chat, /api/brain, /api/letter, /health)
 app/nearby/chat.py        ask the sealed brain about the house: counts in, menu-checked suggestions out
-app/nearby/connector.py   the MCP connector: password, four tools, the same counts-only view
-app/nearby/fixes.py       the taps: quiet, block, undo, through the phone book only; fence as a step list
+app/nearby/connector.py   the MCP door: password, four tools, the same counts-only view; `fix` asks, it never acts
+app/nearby/fixes.py       the fixes: quiet, block, stop one name, fence names, undo; an assistant's ask and the owner's yes
 app/nearby/detectors.py   new names, steady beat, odd hours; counts in, plain words out
 app/tests/                the detectors on a replayed log, the taps against a pretend phone book
 app/nearby/counters.py    AdGuard query log -> per-device counters, eight names each, scrubbed
@@ -117,12 +117,25 @@ Every commit in this repository was made between November 1 and November 14, 202
 
 ## Let an AI you choose in (MCP)
 
-Nearby can be an MCP connector, so an assistant you already use can ask about the house and press the same taps you can. It is off until you set a password: put a long one in `.env` as `NEARBY_MCP_TOKEN` and restart. The address is `http://<nearby's address>:8765/mcp`, and every request must send `Authorization: Bearer <password>`.
+Nearby can be an MCP server, so an assistant you already use can look at the house and ask for changes. It is off until you set a password: put one of 24 characters or more in `.env` as `NEARBY_MCP_TOKEN` and restart. The address is `http://<nearby's address>:8765/mcp`, and every request must send `Authorization: Bearer <password>`.
 
-- Tools: `house` (who is home, counts, what the detectors noticed), `fixes` (what is on), `fix` (quiet or block one gadget, or undo it), `letter` (the latest letter).
-- The assistant gets what the sealed brain gets: names and counts. No addresses, no times.
+- Tools: `house` (who is home, counts, what the detectors noticed), `fixes` (what is on, what is waiting, who changed what), `fix` (ask for one gadget to be quieted or blocked, or for that to be undone), `letter` (the latest letter).
+- **An assistant can ask. It cannot act.** `fix` puts an ask at the top of Nearby's page: "Block the Hatch?" with Yes and No. Nothing changes until the owner taps Yes. An ask lapses after 15 minutes.
+- The assistant gets what the sealed brain gets: names and counts. No addresses, no times. A name a gadget gave itself is cut down to 40 plain characters first.
+- The router and Nearby itself can never be blocked, at the ask or at the yes.
 - It reaches Nearby over the home network only. Nearby does not open a door to the internet.
 - An assistant connected here is not the sealed brain. What it reads leaves the house under that assistant's own rules. That is your call, which is why the door starts shut.
+
+Do X, see Y, with the password in `$T`:
+
+```
+curl -s -X POST http://localhost:8765/mcp -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"house","arguments":{}}}'
+```
+
+**See:** the house in plain words, with no address in it. Call `fix` the same way, then open the page. **See:** the ask, waiting for you.
+
+Not done yet for the door: one password is shared by every assistant, it travels unscrambled on the home network, and there is no limit on how often an assistant may ask beyond five asks waiting at once.
 
 ## Where this is going
 
@@ -135,7 +148,7 @@ Two ways to get it, same code either way:
 - **Bring your own hardware.** The code is open. Put it on a Raspberry Pi or any small Linux computer at install.
 - **Buy it ready.** The same small computer, set up before it arrives.
 
-Not built yet: Nearby signing in to the router, the safe network, and anything that controls a gadget directly.
+Not built yet: Nearby signing in to the router, the safe network, the NEAR model asking through the same door, and anything that controls a gadget directly.
 
 ## Licence
 

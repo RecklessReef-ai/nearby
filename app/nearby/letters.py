@@ -32,6 +32,8 @@ def write(force: bool = False, weekly: bool = False) -> dict | None:
     if proof.get("ok"):
         try:
             reply = brain.ask(sent, proof)
+            if not str(reply["verified"]).startswith("verified"):
+                raise RuntimeError("the reply's signature could not be checked: " + str(reply["verified"]))
             result = brain.parse_reply(reply["text"], labels)
             source, detail = "sealed", reply["verified"]
             result["tokens"] = reply["tokens"]

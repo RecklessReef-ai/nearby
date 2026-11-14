@@ -1,4 +1,4 @@
-# Nearby, prototype A: runs on the laptop. Both services use the host network
+# Nearby runs on one small box beside the router. Both services use the host network
 # so they can see the house (the app) and answer the house (AdGuard on port 53).
 services:
   adguard:
@@ -17,3 +17,4 @@ services:
     env_file: .env
     volumes:
       - ./data:/data
+      - /etc/localtime:/etc/localtime:ro  # the house's clock: the 8 pm letter and the night detector use it

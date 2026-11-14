@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 from datetime import datetime, timezone
 from urllib.error import HTTPError
@@ -75,9 +76,14 @@ def today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def _proof_file(date: str, model: str):
+    """One proof a day per model. The letter's model keeps the plain name; any other model gets its own file beside it."""
+    return PROOFS / (f"{date}.json" if model == MODEL else f"{date}.{re.sub(r'[^A-Za-z0-9]+', '-', model)}.json")
+
+
 def proof_today(model: str = MODEL) -> dict | None:
     try:
-        p = json.loads((PROOFS / f"{today()}.json").read_text())
+        p = json.loads(_proof_file(today(), model).read_text())
         return p if p.get("model") == model else None
     except (OSError, ValueError):
         return None
@@ -127,7 +133,7 @@ def morning_check(model: str = MODEL, force: bool = False) -> dict:
 
 def _save_proof(proof: dict) -> dict:
     PROOFS.mkdir(parents=True, exist_ok=True)
-    (PROOFS / f"{proof['date']}.json").write_text(json.dumps(proof, indent=2))
+    _proof_file(proof["date"], proof["model"]).write_text(json.dumps(proof, indent=2))
     return proof
 
 
@@ -201,7 +207,7 @@ def decrypt_with(encrypted_hex: str, client_x25519_secret: bytes) -> str:
 
 # ---------- the call ----------
 
-def ask(user_text: str, proof: dict, model: str = MODEL, max_tokens: int = 600) -> dict:
+def ask(user_text: str, proof: dict, model: str = MODEL, max_tokens: int = 2500, system: str = SYSTEM) -> dict:
     """One sealed, end-to-end encrypted call. Returns {text, verified, chat_id, tokens}. Raises on failure."""
     ok, why = within_caps()
     if not ok:
@@ -212,7 +218,7 @@ def ask(user_text: str, proof: dict, model: str = MODEL, max_tokens: int = 600) 
     model_pub = proof["signing_public_key"]
     body = json.dumps({
         "model": model,
-        "messages": [{"role": "system", "content": encrypt_for(SYSTEM, model_pub)},
+        "messages": [{"role": "system", "content": encrypt_for(system, model_pub)},
                      {"role": "user", "content": encrypt_for(user_text, model_pub)}],
         "max_tokens": max_tokens, "temperature": 0.3,
     }, separators=(",", ":")).encode()
@@ -225,6 +231,9 @@ def ask(user_text: str, proof: dict, model: str = MODEL, max_tokens: int = 600) 
     text = decrypt_with(msg["content"], client_x_secret) if msg.get("content") else ""
     usage = data.get("usage") or {}
     _record(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), model)
+    if not text.strip():
+        # The model thinks before it writes; if the thinking used the whole budget there is no letter.
+        raise RuntimeError("the sealed brain ran out of room before it wrote anything")
     verified = _verify_signature(data.get("id", ""), body, raw, model, proof)
     return {"text": text, "verified": verified, "chat_id": data.get("id"), "tokens": usage.get("total_tokens", 0)}
 
@@ -291,5 +300,12 @@ def local_letter(summary: dict) -> dict:
             parts.append("New names it never asked for before: " + ", ".join(d["new"][:3]) + ".")
     else:
         parts.append("Nothing was pointed at the phone book today, so there is nothing to report on what was asked.")
-    parts.append("Nothing here needs you tonight.")
+    odd = summary.get("odd") or []
+    if odd:
+        f = odd[0]
+        parts.append(f"One thing worth a look: the {f['label']} {f['text']}")
+        if len(odd) > 1:
+            parts.append(f"{len(odd) - 1} more on the house page.")
+    else:
+        parts.append("Nothing here needs you tonight.")
     return {"letter": " ".join(parts), "suggestions": []}

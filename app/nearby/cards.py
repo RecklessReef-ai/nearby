@@ -7,6 +7,7 @@ it sends home, which switch turns that off, and what Nearby can do.
 
 CARDS: dict[str, dict] = {
     "samsung_tv": {
+        "gist": "Fingerprints the screen about once a minute.",
         "what": "A Samsung smart TV. It runs its own apps and its own software, Tizen.",
         "sends_home": [
             "A fingerprint of what is on the screen, about once a minute, to Samsung. This is on even when the TV is only used as a monitor for a game console or a laptop.",
@@ -18,10 +19,11 @@ CARDS: dict[str, dict] = {
             "Settings > General > Terms & Privacy > Interest-Based Advertising: off.",
             "Settings > General > Terms & Privacy > Voice Recognition Services: off, if you never talk to the TV.",
         ],
-        "nearby_can": "Answer the TV's name lookups from this computer, so you can see every name it asks for and quiet the ones you don't want. On the TV: Settings > General > Network > Network Status > IP Settings > DNS Setting > Enter manually > {lan_ip}.",
+        "nearby_can": "Answer the TV's name lookups, so you can see every name it asks for and quiet the ones you don't want. On the TV: Settings > General > Network > Network Status > IP Settings > DNS Setting > Enter manually > {lan_ip}.",
         "feeling": "This is the loudest thing in most houses. It is not a hack. It is how the TV was sold.",
     },
     "google_tv": {
+        "gist": "Reports usage to Google by default.",
         "what": "A Google TV streaming device. It plays apps and lets phones cast to it.",
         "sends_home": [
             "Usage statistics and crash reports to Google: when casting starts, which apps, errors. On by default, and on for this one.",
@@ -31,10 +33,11 @@ CARDS: dict[str, dict] = {
             "Google Home app > this device > Settings > 'Send device usage data and crash reports': off.",
             "On the TV: Settings > Privacy > Usage & diagnostics: off.",
         ],
-        "nearby_can": "Not much from a laptop. This device skips your router's phone book and asks Google's directly, so this computer never sees the names it looks up. A box at the door catches that; a laptop can't.",
+        "nearby_can": "Answer its name lookups, so you can see what it asks for and stop single names. Some of these devices also ask Google's own phone book directly, so Nearby may not hear everything it does.",
         "feeling": "Normal for a Google device. The two switches above cut most of it.",
     },
     "cloud_gadget": {
+        "gist": "Keeps a line open to its maker all day.",
         "what": "A small gadget with a Wi-Fi chip inside (a sound machine, a plug, a light, a sensor). Its app talks to it through the maker's cloud, not directly.",
         "sends_home": [
             "A connection to the maker's cloud that stays open all day, so the app can reach it from anywhere.",
@@ -43,10 +46,11 @@ CARDS: dict[str, dict] = {
         "switches": [
             "Nothing to switch off on the gadget itself. It has no screen and no settings page.",
         ],
-        "nearby_can": "Fence it: put it in a group that can reach the internet but none of your other devices. If it is ever taken over, it can't reach your laptop or your phone. This needs the router's help (coming on day 7) or a box at the door.",
+        "nearby_can": "Fence it: put it in a group that can reach the internet but none of your other devices. If it is ever taken over, it can't reach your laptop or your phone. This needs the router, so for now it is three steps by hand, below.",
         "feeling": "Harmless on a good day. Fencing is what you do for the bad day.",
     },
     "router": {
+        "gist": "The front door of the house.",
         "what": "The front door of the house. Every device's traffic goes through it.",
         "sends_home": [
             "ASUS routers: if AiProtection, Traffic Analyzer, Adaptive QoS or Web History are on, traffic data goes to Trend Micro. Their notice says this can include web addresses and files.",
@@ -55,10 +59,11 @@ CARDS: dict[str, dict] = {
         "switches": [
             "ASUS: AiProtection > turn off what you don't use. Adaptive QoS > Web History: off.",
         ],
-        "nearby_can": "Later this week: log in for you and move a gadget to the guest network, block one, or set the house's phone book, behind one tap, with undo.",
+        "nearby_can": "Nearby's taps (quiet, block) go through the phone book, not the router, so nothing here logs into it. Fencing a gadget onto the guest network is still done by hand; the steps are on each gadget's card.",
         "feeling": "Keep its software up to date. That matters more than any setting.",
     },
     "game_console": {
+        "gist": "Updates and online play. Normal.",
         "what": "A game console.",
         "sends_home": ["Game updates, online play, friends and the store, to its maker. Normal."],
         "switches": ["Parental controls live in the maker's phone app, if there are kids."],
@@ -66,6 +71,7 @@ CARDS: dict[str, dict] = {
         "feeling": "Nothing to worry about here.",
     },
     "phone": {
+        "gist": "A phone. Fine.",
         "what": "A phone. Probably yours.",
         "sends_home": ["Whatever its apps send. That is a different fight, and not one for this screen."],
         "switches": [],
@@ -73,6 +79,7 @@ CARDS: dict[str, dict] = {
         "feeling": "Fine.",
     },
     "phone_or_laptop": {
+        "gist": "A phone, tablet or laptop. Fine.",
         "what": "A phone, tablet or laptop. It hides its real hardware address, which is what phones do now.",
         "sends_home": ["Whatever its apps send."],
         "switches": [],
@@ -80,20 +87,23 @@ CARDS: dict[str, dict] = {
         "feeling": "Fine.",
     },
     "this_computer": {
-        "what": "This computer. Nearby is running on it.",
-        "sends_home": ["Nearby sends nothing about your house anywhere unless you turn the sealed brain on (day 5)."],
+        "gist": "This is where Nearby lives.",
+        "what": "The Nearby box. This page is running on it.",
+        "sends_home": ["Nearby sends nothing about your house anywhere unless you turn the sealed brain on, or connect an assistant of your own."],
         "switches": [],
-        "nearby_can": "See who is in the house, not what they say. A laptop only hears its own traffic.",
+        "nearby_can": "Hear the names each gadget asks for, and refuse the ones you stop. It does not see what a gadget then says.",
         "feeling": "Fine.",
     },
     "roku": {
+        "gist": "Sends viewing data to Roku for ads.",
         "what": "A Roku streaming device.",
         "sends_home": ["Viewing data and a screen fingerprint on Roku TVs, to Roku, for ads."],
         "switches": ["Settings > Privacy > Smart TV experience > Use info from TV inputs: off. Settings > Privacy > Advertising > Limit ad tracking: on."],
-        "nearby_can": "Answer its name lookups from this computer so you can see and quiet them.",
+        "nearby_can": "Answer its name lookups so you can see and quiet them.",
         "feeling": "Like the Samsung TV: loud by design, quieter with two switches.",
     },
     "unknown": {
+        "gist": "Not recognised yet.",
         "what": "Something new. Nearby could not tell what it is from the network alone yet.",
         "sends_home": ["Unknown until it answers its name lookups here."],
         "switches": [],

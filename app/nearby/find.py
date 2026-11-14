@@ -191,6 +191,14 @@ def identify(ip: str, mac: str, me: str, gw: str) -> dict:
     return d
 
 
+def remember(old: dict, new: dict) -> dict:
+    """A gadget Nearby has recognised stays recognised. A sleeping TV closes the port it was named by;
+    the same hardware address is still the same TV, so its kind, name and facts are kept."""
+    if new.get("kind") == "unknown" and old.get("kind") not in (None, "unknown", "this_computer", "router"):
+        new.update(kind=old["kind"], label=old.get("label") or new.get("label", ""), facts=old.get("facts") or new.get("facts") or {})
+    return new
+
+
 def load() -> dict:
     try:
         return json.loads(DEVICES_FILE.read_text())
@@ -211,6 +219,7 @@ def scan() -> dict:
     state = load()
     for r in results:
         old = state["devices"].get(r["mac"], {})
+        remember(old, r)
         r["first_seen"] = old.get("first_seen", now)
         r["last_seen"] = now
         r["is_new"] = not old

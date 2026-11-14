@@ -6,10 +6,9 @@ where the words came from (sealed brain or local template), and a signature.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 
-from . import brain, counters, housekey
+from . import brain, counters, detectors, housekey
 from .find import DATA_DIR
 
 LETTERS = DATA_DIR / "letters"
@@ -18,6 +17,11 @@ LETTERS = DATA_DIR / "letters"
 def write(force: bool = False, weekly: bool = False) -> dict | None:
     """Write tonight's letter. Returns None when the day was quiet and nothing forced it."""
     summary = counters.summarize()
+    try:
+        summary["odd"] = [{"label": f["label"], "type": f["type"], "text": f["text"]} for f in detectors.run()]
+    except Exception:
+        summary["odd"] = []
+    summary["quiet"] = summary["quiet"] and not summary["odd"]
     if summary["quiet"] and not force and not weekly:
         return None
     sent = counters.as_text(summary)
@@ -37,7 +41,7 @@ def write(force: bool = False, weekly: bool = False) -> dict | None:
         detail = proof.get("error", "not sealed today")
     if result is None:
         result = brain.local_letter(summary)
-    now = datetime.now(timezone.utc)
+    now = datetime.now().astimezone()  # the house's own clock, so an evening letter carries that evening's date
     record = {
         "date": now.date().isoformat(), "written_at": now.isoformat(timespec="seconds"), "weekly": weekly,
         "letter": result["letter"], "suggestions": result["suggestions"], "source": source, "detail": detail,

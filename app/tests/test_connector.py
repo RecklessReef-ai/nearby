@@ -7,7 +7,7 @@ import unittest
 
 os.environ.setdefault("NEARBY_DATA", tempfile.mkdtemp())
 try:
-    from nearby import connector, counters, find, fixes
+    from nearby import connector, counters, find, fixes, rules
 except ModuleNotFoundError as e:
     raise unittest.SkipTest(f"needs the app image: {e}")
 
@@ -64,7 +64,7 @@ class Door(unittest.TestCase):
         self.assertEqual((r["protocolVersion"], r["serverInfo"]["name"]), ("2025-03-26", "nearby"))
         self.assertEqual(rpc("initialize", {"protocolVersion": "1999-01-01"})["result"]["protocolVersion"], connector.PROTOCOLS[0])
         self.assertIsNone(connector.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
-        self.assertEqual([t["name"] for t in rpc("tools/list")["result"]["tools"]], ["house", "fixes", "fix", "letter"])
+        self.assertEqual([t["name"] for t in rpc("tools/list")["result"]["tools"]], ["house", "fixes", "fix", "tables", "rows", "rules", "letter"])
         self.assertEqual(rpc("resources/list")["error"]["code"], -32601)
 
     def test_what_comes_through_has_names_and_no_addresses(self):
@@ -127,3 +127,67 @@ class Door(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HouseRules(unittest.TestCase):
+    setUp = Door.setUp
+
+    def test_every_brain_is_given_the_same_job_and_rules(self):
+        told = rpc("initialize", {"protocolVersion": "2025-06-18"})["result"]["instructions"]
+        self.assertIn(rules.JOB, told)
+        for rule, _ in rules.RULES:
+            self.assertIn(rule, told)
+
+    def test_an_assistant_can_read_the_rules_and_how_code_holds_them(self):
+        text, err = tool("rules")
+        self.assertFalse(err)
+        self.assertIn(rules.JOB, text)
+        self.assertEqual(text.count("Held by code:"), len(rules.RULES))
+        self.assertIn("rules", [t["name"] for t in rpc("tools/list")["result"]["tools"]])
+
+    def test_an_address_never_gets_out_through_the_door(self):
+        for leak in ("192.168.0.70", "aa:aa:aa:aa:aa:70", "fe80::1c2d:3e4f:5a6b", "2026-11-14T04:48", "4:48"):
+            self.assertNotIn(leak, rules.keep_home(f"the TV at {leak} woke up"))
+        real = connector._letter
+        self.addCleanup(setattr, connector, "_letter", real)
+        connector._letter = lambda: "The TV at 192.168.0.70 (aa:aa:aa:aa:aa:70) woke at 4:48."
+        text, _ = tool("letter")
+        self.assertNotIn("192.168.0.70", text)
+        self.assertNotIn("aa:aa:aa:aa:aa:70", text)
+        self.assertNotIn("4:48", text)
+        self.assertIn(rules.STRUCK, text)
+        self.assertIn("The TV", text)
+
+    def test_the_last_check_leaves_plain_words_and_dates_alone(self):
+        plain = "- Living room TV: quieted since 2026-11-14, 774 lookups, 45 different names"
+        self.assertEqual(rules.keep_home(plain), plain)
+
+
+class NoBrainOnTheBox(unittest.TestCase):
+    setUp = Door.setUp
+
+    def test_a_brain_is_shown_gadgets_by_name_with_what_can_be_done_and_no_address(self):
+        text, err = tool("house")
+        self.assertFalse(err)
+        self.assertIn("- Living room TV (samsung tv): can be quieted or blocked", text)
+        self.assertFalse(counters.has_address(text))
+        self.assertNotIn("192.168", text)
+
+    def test_the_letter_is_written_on_the_box_with_no_model(self):
+        from nearby import detectors, letters
+        detectors.run = lambda *a, **k: []
+        r = letters.write(force=True)
+        self.assertEqual(r["source"], "local")
+        self.assertNotIn("sent_to_brain", r)
+        self.assertIn("written on the box", letters.as_markdown(r))
+        text, err = tool("letter")
+        self.assertFalse(err)
+        self.assertIn(r["letter"][:20], text)
+
+    def test_the_box_has_no_code_that_calls_a_model(self):
+        import pathlib
+        src = pathlib.Path(connector.__file__).parent
+        self.assertEqual([p.name for p in src.glob("*.py") if p.name in ("brain.py", "sealed.py", "attest.py", "chat.py", "housekey.py")], [])
+        for p in src.glob("*.py"):
+            self.assertNotIn("near.ai", p.read_text(), p.name)
+            self.assertNotIn("NEAR ", p.read_text(), p.name)

@@ -89,7 +89,7 @@ CARDS: dict[str, dict] = {
     "this_computer": {
         "gist": "This is where Nearby lives.",
         "what": "The Nearby box. This page is running on it.",
-        "sends_home": ["Nearby sends nothing about your house anywhere unless you turn the sealed brain on, or connect an assistant of your own."],
+        "sends_home": ["Nearby sends nothing about your house anywhere unless you connect an assistant of your own."],
         "switches": [],
         "nearby_can": "Hear the names each gadget asks for, and refuse the ones you stop. It does not see what a gadget then says.",
         "feeling": "Fine.",

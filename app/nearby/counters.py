@@ -15,7 +15,7 @@ from urllib.request import urlopen
 
 from . import find
 
-ADGUARD = os.environ.get("ADGUARD_URL") or f"http://{find.load().get('me') or '127.0.0.1'}:3000"
+ADGUARD = os.environ.get("ADGUARD_URL") or "http://127.0.0.1:3000"  # the phone book's own controls answer on the box only
 BASELINE = find.DATA_DIR / "baseline.json"
 TOP_N = 8
 _TWO_LEVEL = {"co", "com", "net", "org", "gov", "ac", "edu"}

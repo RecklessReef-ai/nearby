@@ -14,18 +14,17 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from datetime import datetime
 
-from . import __version__, brain, chat, connector, counters, detectors, find, fixes, housekey, letters
+from . import __version__, connector, counters, detectors, find, fixes, letters, owner, rules, store
 from .cards import card
 
 SCAN_EVERY = int(os.environ.get("SCAN_EVERY", "10")) * 60
 LETTER_HOUR = int(os.environ.get("LETTER_HOUR", "20"))  # local time
 _lock = threading.Lock()
 _letter_lock = threading.Lock()
-_chat_lock = threading.Lock()
 
 
 def _loop() -> None:
@@ -43,6 +42,10 @@ def _loop() -> None:
             detectors.run()
         except Exception as e:
             print("detectors failed:", e)
+        try:
+            store.sync()  # the same facts, kept as rows that build up over the days
+        except Exception as e:
+            print("tables failed:", e)
         time.sleep(SCAN_EVERY)
 
 
@@ -63,7 +66,6 @@ def _evening_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    housekey.load_or_make()
     threading.Thread(target=_loop, daemon=True).start()
     threading.Thread(target=_evening_loop, daemon=True).start()
     yield
@@ -95,7 +97,29 @@ async def home_only(request: Request, call_next):
     origin = request.headers.get("origin")
     if request.method != "GET" and origin and urlparse(origin).netloc != host:
         return JSONResponse({"error": "That only works from Nearby's own page."}, status_code=403)
-    return await call_next(request)
+    if not open_to_all(request.url.path) and not owner.signed_in(request.cookies.get(owner.COOKIE)):
+        if request.method == "GET" and not request.url.path.startswith("/api/"):
+            return _guard(RedirectResponse("/login", status_code=303))
+        return _guard(JSONResponse({"error": "Sign in on Nearby's page first."}, status_code=401))
+    return _guard(await call_next(request))
+
+
+OPEN = ("/health", "/mcp", "/login", "/api/login")  # the door has its own password; everything else needs the owner's
+
+
+def open_to_all(path: str) -> bool:
+    return path in OPEN
+
+
+def _guard(response: Response) -> Response:
+    """The same few locks on every answer: no framing by another page, nothing loaded from outside, nothing kept in a cache."""
+    h = response.headers
+    h["X-Frame-Options"] = "DENY"
+    h["X-Content-Type-Options"] = "nosniff"
+    h["Referrer-Policy"] = "no-referrer"
+    h["Cache-Control"] = "no-store"
+    h["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    return response
 
 STYLE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -313,7 +337,7 @@ def map_svg(devs: list[dict], active: dict, noticed_by: dict, lookups: dict) -> 
 def top(here: str) -> str:
     return (f'<div class="top"><div class="brand"><i></i>Nearby</div><nav>'
             f'<a href="/"{" class=here" if here == "house" else ""}>House</a>'
-            f'<a href="/ask"{" class=here" if here == "ask" else ""}>Ask</a>'
+            f'<a href="/brains"{" class=here" if here == "ask" else ""}>Connect</a>'
             f'<a href="/letter"{" class=here" if here == "letter" else ""}>Letter</a></nav></div>')
 
 
@@ -483,56 +507,59 @@ def mcp_no_stream():
     return Response(status_code=405, headers={"Allow": "POST"})
 
 
-class Question(BaseModel):
-    message: str
-    history: list[dict] = []
+class Password(BaseModel):
+    password: str
 
 
-@app.post("/api/chat")
-def ask_brain(q: Question, request: Request):
-    """One question to the sealed brain. Only from Nearby's own page, one at a time."""
-    origin = request.headers.get("origin")
-    if "application/json" not in request.headers.get("content-type", "") or (origin and urlparse(origin).netloc != request.headers.get("host")):
-        return JSONResponse({"error": "Questions only work from Nearby's own page."}, status_code=403)
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    fresh = not owner.is_set()
+    return STYLE + f"""<main><div class="top"><div class="brand"><i></i>Nearby</div></div>
+<div class="hero"><h1>{'Choose a password for this box' if fresh else 'Sign in'}</h1>
+<p class="sub">{'Nobody has claimed this box yet. The password you choose now is the one that opens this page from here on. Use ' + str(owner.MIN_LENGTH) + ' characters or more.' if fresh else 'This page shows your home and can change it, so it asks who you are.'}</p></div>
+<form class="askbar" id="f" style="position:static"><label for="p" hidden>Password</label>
+<input id="p" type="password" autocomplete="{'new-password' if fresh else 'current-password'}" minlength="{owner.MIN_LENGTH if fresh else 1}" required autofocus placeholder="Password">
+<button class="do" type="submit">{'Set it' if fresh else 'Sign in'}</button></form>
+<p class="err" id="e"></p>
+</main><script>
+document.getElementById('f').addEventListener('submit',function(ev){{ev.preventDefault();var e=document.getElementById('e');e.textContent='';
+ fetch('/api/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{password:document.getElementById('p').value}})}})
+ .then(function(r){{return r.json().then(function(j){{return {{ok:r.ok,j:j}}}})}}).then(function(x){{if(x.ok){{location.href='/'}}else{{e.textContent=x.j.error||'That did not work.'}}}})
+ .catch(function(){{e.textContent='Nearby did not answer.'}})}});
+</script></body></html>"""
+
+
+@app.post("/api/login")
+def login(p: Password, request: Request):
+    """The first password on a fresh box claims it. After that, the password signs you in."""
+    who = request.client.host if request.client else "unknown"
+    if owner.locked(who):
+        return JSONResponse({"error": "Too many wrong passwords. Try again in ten minutes."}, status_code=429)
     try:
-        with _chat_lock:
-            return chat.answer(q.message, q.history)
-    except chat.Refused as e:
+        if not owner.is_set():
+            owner.choose(p.password)
+        elif not owner.check(p.password):
+            owner.strike(who)
+            return JSONResponse({"error": "That is not the password."}, status_code=401)
+    except owner.Refused as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    r = JSONResponse({"ok": True})
+    r.set_cookie(owner.COOKIE, owner.sign_in(), max_age=owner.SESSION_SECONDS, httponly=True, samesite="strict", path="/")
+    return r
 
 
-ASK_SCRIPT = """<script>
-var talk=document.getElementById('talk'),box=document.getElementById('q'),send=document.getElementById('send'),turns=[];
-try{turns=JSON.parse(sessionStorage.getItem('nearby-talk')||'[]')}catch(e){}
-function el(tag,cls,text){var n=document.createElement(tag);if(cls)n.className=cls;if(text!=null)n.textContent=text;return n}
-function fixButton(s,undo){var b=el('button',undo?'':'do',undo?'Undo':(s.action==='quiet'?'Quiet it':'Block it'));
- b.onclick=function(){b.disabled=true;fetch('/api/fix',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac:s.mac,action:s.action,undo:undo})})
-  .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})}).then(function(x){var row=b.parentNode;
-   if(x.ok){row.removeChild(b);var old=row.querySelector('.tag');if(old)row.removeChild(old);if(!undo)row.appendChild(el('span','tag '+(s.action==='block'?'stop':'on'),'done'));row.appendChild(fixButton(s,!undo))}
-   else{b.disabled=false;row.appendChild(el('span','err',x.j.error||'That did not work. Nothing was changed.'))}}).catch(function(){b.disabled=false})};return b}
-function show(t){var m=el('div','msg '+t.who,t.text);
- if(t.who==='nearby'&&t.source){m.appendChild(el('span','from '+t.source,t.source==='sealed'?'Answered in the sealed room on NEAR AI Cloud. '+(t.detail||''):'Answered here, without the brain.'))}
- if(t.suggestions&&t.suggestions.length){var box=el('div','sugg');t.suggestions.forEach(function(s){var row=el('div','tap');
-   row.appendChild(el('span',null,s.action.charAt(0).toUpperCase()+s.action.slice(1)+' the '+s.device+'. '+s.why));
-   if(s.action==='fence'||!s.can||!s.mac){row.appendChild(el('span','why',s.action==='fence'?'Fencing is three steps by hand. Open its card on the House page.':'Open its card on the House page.'))}
-   else{if(s.on)row.appendChild(el('span','tag '+(s.action==='block'?'stop':'on'),'done'));row.appendChild(fixButton(s,!!s.on))}
-   box.appendChild(row)});m.appendChild(box)}
- talk.appendChild(m);m.scrollIntoView({block:'end'});return m}
-function keep(){try{sessionStorage.setItem('nearby-talk',JSON.stringify(turns.slice(-12)))}catch(e){}}
-function ask(text){text=(text||box.value).trim();if(!text||send.disabled)return;box.value='';send.disabled=true;
- var history=turns.map(function(t){return {who:t.who,text:t.text}}).slice(-6);
- var mine={who:'you',text:text};turns.push(mine);show(mine);var wait=show({who:'nearby wait',text:'Asking the sealed brain…'});
- fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,history:history})})
- .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})})
- .then(function(x){talk.removeChild(wait);var t=x.ok?{who:'nearby',text:x.j.reply,source:x.j.source,detail:x.j.detail,suggestions:x.j.suggestions}:{who:'nearby',text:x.j.error||'That did not work.'};
-  if(x.ok){turns.push(t);keep()}else{turns.pop()}show(t)})
- .catch(function(){talk.removeChild(wait);turns.pop();show({who:'nearby',text:'Nearby did not answer. Check that it is still running.'})})
- .then(function(){send.disabled=false;box.focus()})}
-document.getElementById('askform').addEventListener('submit',function(e){e.preventDefault();ask()});
-Array.prototype.forEach.call(document.querySelectorAll('.chips button'),function(b){b.onclick=function(){ask(b.textContent)}});
-document.getElementById('fresh').onclick=function(){turns=[];keep();talk.textContent=''};
-turns.forEach(show);
-</script>"""
+@app.get("/logout")
+def logout(request: Request):
+    owner.sign_out(request.cookies.get(owner.COOKIE))
+    r = RedirectResponse("/login", status_code=303)
+    r.delete_cookie(owner.COOKIE, path="/")
+    return r
+
+
+@app.get("/api/tables")
+def tables_now():
+    """How many rows each of the home's tables holds."""
+    return store.counts()
 
 
 COPY_SCRIPT = """<script>
@@ -545,14 +572,7 @@ function copy(b,id){var t=document.getElementById(id).textContent;
 
 @app.get("/brains", response_class=HTMLResponse)
 def brains_page(request: Request):
-    """Plain words on the difference between the brains Nearby can work with, and which are switched on in this house."""
-    status = brain.proof_today() or {}
-    if not brain.key():
-        sealed_now = '<span class="tag">off: no NEAR AI Cloud key set</span>'
-    elif status.get("ok"):
-        sealed_now = '<span class="tag on">on: seal checked today</span>'
-    else:
-        sealed_now = '<span class="tag on">on: seal is checked before the next question</span>'
+    """How an AI the owner picks gets in, and what it is told. No brain lives on the box."""
     door_now = '<span class="tag on">on: password set</span>' if connector.token() else '<span class="tag">off: no password set</span>'
 
     def row(label: str, text: str) -> str:
@@ -574,25 +594,15 @@ def brains_page(request: Request):
 <p>On the Nearby box, open its settings file and put a long password (24 characters or more) on the line <code>NEARBY_MCP_TOKEN=</code>. Restart Nearby. Then come back here for the address.</p></details>"""
 
     return STYLE + f"""<main>{top('ask')}
-<div class="hero"><h1>Choose your brain</h1>
-<p class="sub">Nearby gathers the facts about your home and does the work. A brain helps you decide what to do. You can use one, both, or none.</p></div>
-
-<div class="panel"><p class="eyebrow">The private brain</p>
-<h2 class="h2">NEAR AI, in a sealed room</h2>{sealed_now}
-<ul class="facts">
-{row("Who can read your home's facts", "Only the model. Not NEAR, not the company that made the model, not us. Nearby checks the seal every morning before it sends anything.")}
-{row("What it is shown", "Counts and names only. Never an address, never a time.")}
-{row("Speed", "Slow today. An answer can take a couple of minutes.")}
-{row("Cost", "Your own NEAR AI Cloud account. A letter costs a fraction of a cent.")}
-{row("Good for", "The nightly letter, and questions you don't mind waiting on.")}
-</ul>
-<p class="gist">The seal rests on trust in the chip maker, and sealed rooms have been broken before. So we say "sealed, and checked every morning", not "nobody could ever see it".</p></div>
+<div class="hero"><h1>Connect a brain</h1>
+<p class="sub">Nearby holds your home's data and scripts, and does the work. It has no brain of its own. You bring one, through one door, or use none.</p></div>
 
 <div class="panel"><p class="eyebrow">Your own assistant</p>
 <h2 class="h2">Any AI you already use, through Nearby's password door</h2>{door_now}
 <ul class="facts">
-{row("Who can read your home's facts", "The company behind that assistant, under its own rules. It is not sealed.")}
-{row("What it is shown", "The same counts and names as the private brain. Never an address.")}
+{row("Who can read your home's facts", "The company behind that assistant, under its own rules. That is your choice to make, which is why the door starts shut.")}
+{row("What it is shown", "Counts and names only. Never an address, never a time.")}
+{row("Which model", "Any. The door is the same for every model, and no model runs on the box.")}
 {row("Speed", "Fast. It answers like any chat.")}
 {row("Cost", "Whatever you already pay for it.")}
 {row("Good for", "Back-and-forth, and bigger jobs that need a stronger model.")}
@@ -607,48 +617,20 @@ def brains_page(request: Request):
 {row("What you lose", "Explanations in plain words, and suggestions.")}
 </ul></div>
 
-<div class="wall"><strong>What never changes, whichever brain you pick.</strong> A brain can suggest. It cannot act. Only your tap changes anything in the house, and every tap has an undo.</div>
-<p><a href="/ask">Back to Ask</a></p>
+<div class="panel"><p class="eyebrow">The house rules</p>
+<h2 class="h2">What every brain is told, whichever one you pick</h2>
+<p class="gist">{html.escape(rules.JOB)}</p>
+<ul class="facts">
+{"".join(row(r, "Held by code: " + held) for r, held in rules.RULES)}
+</ul>
+<p class="gist">These words live on the box and go to every brain. A brain can ignore words, so plain code holds each rule too.</p></div>
 </main>""" + COPY_SCRIPT + "</body></html>"
 
 
-@app.get("/ask", response_class=HTMLResponse)
-def ask_page():
-    status = brain.proof_today() or {}
-    ok, why = brain.within_caps()
-    if not brain.key():
-        seal = "No NEAR AI Cloud key is set, so answers come from Nearby alone."
-    elif not ok:
-        seal = "The brain is resting: " + html.escape(why) + ". Answers come from Nearby alone until then."
-    elif status.get("ok"):
-        seal = "Sealed brain checked today at " + html.escape(str(status.get("checked_at", ""))[11:16]) + " UTC."
-    else:
-        seal = "The seal is checked before your first question today. That one takes a little longer."
-    return STYLE + f"""<main>{top('ask')}
-<div class="hero"><h1>Ask about your house</h1>
-<p class="sub">The brain sees counts only: who is home and how many names each gadget asked for. It can suggest; only your tap changes anything. <a href="/brains">Which brain is this, and what are my choices?</a></p></div>
-<div class="chips"><button type="button">Is anything in my house worth worrying about?</button><button type="button">What is the loudest gadget, and is that normal?</button><button type="button">What should I do first to protect my home?</button></div>
-<div class="talk" id="talk" aria-live="polite"></div>
-<form class="askbar" id="askform"><label for="q" hidden>Your question</label>
-<input id="q" type="text" maxlength="{chat.MAX_QUESTION}" autocomplete="off" placeholder="Ask about your house">
-<button class="do" id="send" type="submit">Ask</button></form>
-<div class="row"><button type="button" id="fresh">Start over</button></div>
-<footer>{seal} Model: {html.escape(brain.MODEL)}. Your words go sealed, end to end, to the attested model; nothing about this talk is kept on Nearby. Leave out addresses; call a gadget by its name.</footer>
-</main>""" + ASK_SCRIPT + "</body></html>"
-
-
-@app.get("/api/brain")
-def brain_status():
-    proof = brain.proof_today() or {}
-    ok, why = brain.within_caps()
-    return {"model": brain.MODEL, "sealed_list": list(brain.SEALED_MODELS), "key_present": bool(brain.key()),
-            "today": {k: proof.get(k) for k in ("ok", "checked_at", "signing_address", "checks", "error")},
-            "caps_ok": ok, "caps_note": why, "house": housekey.account_id(), "house_key": housekey.public_key_near()}
-
-
-@app.post("/api/brain/check")
-def brain_check():
-    return brain.morning_check(force=True)
+@app.get("/ask")
+def ask_moved():
+    """The Ask page talked to a brain on the box. There isn't one now; a brain comes in through the door."""
+    return RedirectResponse("/brains")
 
 
 @app.post("/api/letter")
@@ -666,7 +648,6 @@ def list_letters():
 @app.get("/letter", response_class=HTMLResponse)
 def letter_page():
     r = letters.latest()
-    status = brain.proof_today() or {}
     if r:
         devs = [d for d in find.load().get("devices", {}).values() if d.get("online")]
         active = fixes.load()["active"]
@@ -681,28 +662,24 @@ def letter_page():
             return f"""<button class="do" onclick="tap(this,'{mac}','{sg['action']}',false)">{TAP_WORDS[sg['action']][0]}</button>"""
 
         sugg = "".join(f"<li class='tap'><span><b>{html.escape(s['action'].capitalize())}</b> the {html.escape(s['device'])}. {html.escape(s['why'])}</span>{button(s)}</li>" for s in r["suggestions"])
-        sealed = r["source"] == "sealed"
-        where = "Written in a sealed room on NEAR AI Cloud." if sealed else "Written here, from a template."
+        in_room = r["source"] == "sealed"
+        where = "Written earlier by an outside model." if in_room else "Written on the box, from a template. No model."
         body = f"""<div class="hero"><p class="eyebrow">{'Weekly letter' if r.get('weekly') else 'Evening letter'} · {html.escape(r['date'])}</p><h1>Your house</h1></div>
 <div class="paper"><p>{html.escape(r['letter'])}</p></div>
 {('<div class="panel card"><p class="eyebrow">Nearby suggests</p><ul>' + sugg + '</ul><p class="gist">Nothing happens until you tap. Every tap has an undo.</p><p class="err"></p></div>') if sugg else ''}
 <div class="panel">
-  <div class="seal{'' if sealed else ' local'}"><i>{'✓' if sealed else '·'}</i><span><strong>{where}</strong> {html.escape(str(r.get('detail', '')))}.</span></div>
+  <div class="seal{'' if in_room else ' local'}"><i>{'✓' if in_room else '·'}</i><span><strong>{where}</strong> {html.escape(str(r.get('detail', '')))}.</span></div>
   <details class="more"><summary>What left the house</summary>
-    <p>Counters only: {len((r.get('sent_to_brain') or '').split())} words. No addresses, no times.</p>
-    <p>Signed by this house's key <code>{html.escape(r['house'][:16])}…</code></p>
+    <p>{('Counters only: ' + str(len((r.get('sent_to_brain') or '').split())) + ' words. No addresses, no times.') if in_room else 'Nothing. This letter was written on the box.'}</p>
   </details>
 </div>"""
     else:
         body = """<div class="hero"><h1>No letter yet.</h1><p class="sub">The first one is written at 8 pm, or now with the button.</p></div>"""
-    seal = ("Sealed brain checked today at " + html.escape(str(status.get("checked_at", ""))[11:16]) + " UTC." if status.get("ok")
-            else "Sealed brain: " + html.escape(str(status.get("error") or "not checked yet today")) + ".")
     return STYLE + f"""<main>{top('letter')}{body}
 <div class="row">
 <button onclick="this.disabled=true;this.textContent='Writing…';fetch('/api/letter',{{method:'POST'}}).then(()=>location.reload())">Write tonight's letter now</button>
-<button onclick="this.disabled=true;this.textContent='Checking…';fetch('/api/brain/check',{{method:'POST'}}).then(()=>location.reload())">Check the seal</button>
 </div>
-<footer>{seal} Model: {html.escape(brain.MODEL)}.</footer>
+<footer>Written on the box by plain code. A brain you connect can read this letter through the door.</footer>
 </main>""" + SCRIPT + "</body></html>"
 
 
@@ -778,6 +755,6 @@ def page():
 <div class="list">{''.join(items)}</div>
 <div class="row"><button onclick="this.disabled=true;this.textContent='Looking…';fetch('/api/scan',{{method:'POST'}}).then(()=>location.reload())">Look again</button></div>
 <div class="wall"><strong>What Nearby can't see from here.</strong> It hears the names each gadget asks for, not what the gadget then says. A gadget that carries its own phone book goes around it. Only something in the path of the traffic sees everything.</div>
-<p><a href="/brains">Choose your brain, or connect your own assistant</a></p>
+<p><a href="/brains">Connect a brain, and read the house rules it is given</a> · <a href="/logout">Sign out</a></p>
 <footer>Nearby {__version__} · last look {html.escape(s.get('last_scan') or 'none yet')} UTC · {html.escape(learning)} · everything here was learned from the network alone. No name was searched online.</footer>
 </main>""" + SCRIPT + "</body></html>"
